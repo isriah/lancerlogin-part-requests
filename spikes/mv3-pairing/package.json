@@ -1,0 +1,12 @@
+{
+  "name": "part-requests-mv3-pairing-spike",
+  "private": true,
+  "type": "module",
+  "description": "Phase 0 spike: a Manifest V3 extension pairing against a local preview. Not part of the plugin.",
+  "scripts": {
+    "e2e": "node --experimental-strip-types --disable-warning=ExperimentalWarning e2e.mjs"
+  },
+  "dependencies": {
+    "playwright": "1.49.1"
+  }
+}
