@@ -129,7 +129,7 @@ All paired devices can read the whole team's open orders, requester names and pr
 }
 ```
 
-- **Which orders.** Those in a status named NORMAL, RUSH or SLOW, alone or followed by "Request", in any case, as listed in the saved schema. A status the database doesn't have returns nothing. `statuses` lists what was asked for. Tick by `statusGroup`: NORMAL and RUSH on, SLOW off.
+- **Which orders.** Those in a status named NORMAL, RUSH, SLOW or INCOMPLETE, alone or followed by "Request", in any case, as listed in the saved schema. A status the database doesn't have returns nothing. `statuses` lists what was asked for. Tick by `statusGroup`: NORMAL and RUSH on, SLOW and INCOMPLETE off.
 - **Blank fields.** Rows are also written by hand in Notion, so `description`, `vendor`, `sku`, `productUrl`, `quantity` and `unitPrice` can each be `null`, and `teams` and `requesters` can be empty. `productUrl` is only ever an `http` or `https` address. `quantity` is above zero and `unitPrice` is zero or more, and anything else reads as `null`.
 - **`vendor` and `urlVendor`.** `vendor` is the row's Vendor option. `urlVendor` is the supported store the product address belongs to. Either can be `null`, and they can disagree.
 - **`cartMarks`** is one entry per device that built a cart for this order, newest first. Empty means nobody has. Marks are always current, whatever the age of the list.

@@ -48,18 +48,18 @@ const cartsDisabled = () => refuse(403, "carts_disabled", cartsDisabledMessage);
 
 // ---- Which statuses are open
 
-export type StatusGroup = "NORMAL" | "RUSH" | "SLOW";
+export type StatusGroup = "NORMAL" | "RUSH" | "SLOW" | "INCOMPLETE";
 export type OpenStatus = Choice & { readonly group: StatusGroup };
 
 /**
- * The saved schema's options that count as open: NORMAL, RUSH or SLOW, on their own or followed by "Request", in any case.
+ * The saved schema's options that count as open: NORMAL, RUSH, SLOW or INCOMPLETE, on their own or followed by "Request", in any case.
  * The exact match is deliberate, so an option such as "SLOW - ordered" is not read as open. An option the database does not have
  * returns nothing, and it is picked up when the refresh job next saves the schema.
  */
 export function openStatuses(schema: Schema): readonly OpenStatus[] {
   const open: OpenStatus[] = [];
   for (const option of schema.properties.status.options ?? []) {
-    const group = /^(NORMAL|RUSH|SLOW)(?: REQUEST)?$/.exec(option.name.trim().toUpperCase())?.[1] as StatusGroup | undefined;
+    const group = /^(NORMAL|RUSH|SLOW|INCOMPLETE)(?: REQUEST)?$/.exec(option.name.trim().toUpperCase())?.[1] as StatusGroup | undefined;
     if (group) open.push({ ...option, group });
   }
   return open;

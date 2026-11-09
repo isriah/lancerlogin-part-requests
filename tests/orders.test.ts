@@ -75,8 +75,8 @@ test("the query goes to the data source with a status filter on the mapped prope
   assert.equal(call.headers["Notion-Version"], "2026-03-11");
   assert.deepEqual(call.body, {
     page_size: ordersPageSize,
-    // Names from the saved schema. Incomplete is not open, and this schema has no SLOW option, so neither is asked for.
-    filter: { or: [{ property: "st%40t", status: { equals: "NORMAL Request" } }, { property: "st%40t", status: { equals: "RUSH" } }] },
+    // Names from the saved schema. Incomplete is open, shown unticked; this schema has no SLOW option, so it is not asked for.
+    filter: { or: [{ property: "st%40t", status: { equals: "NORMAL Request" } }, { property: "st%40t", status: { equals: "Incomplete Request" } }, { property: "st%40t", status: { equals: "RUSH" } }] },
     sorts: [{ timestamp: "created_time", direction: "ascending" }],
   });
   assert.ok(!("filter_properties" in call.body));
@@ -93,7 +93,7 @@ test("a Status property of type select filters as select", async () => {
   answerWith(seen);
   const answer = await get(key);
   assert.deepEqual(stub.calls[0]!.body.filter.or, [
-    { property: "st4t", select: { equals: "NORMAL Request" } }, { property: "st4t", select: { equals: "RUSH" } }, { property: "st4t", select: { equals: "SLOW Request" } },
+    { property: "st4t", select: { equals: "NORMAL Request" } }, { property: "st4t", select: { equals: "Incomplete Request" } }, { property: "st4t", select: { equals: "RUSH" } }, { property: "st4t", select: { equals: "SLOW Request" } },
   ]);
   assert.equal(answer.body.orders[0].status, "SLOW Request");
   assert.equal(answer.body.orders[0].statusGroup, "SLOW");
@@ -101,7 +101,7 @@ test("a Status property of type select filters as select", async () => {
 
 test("open statuses are exact names from the schema: lookalikes are not open", () => {
   const schema = { properties: { status: { id: "s", type: "status", options: ["NORMAL Request", "Normal", "RUSH", "rush request", "SLOW", "SLOW - ordered", "RUSHED", "Not RUSH", "Incomplete Request", "Ordered"].map((name) => ({ id: name, name })) } } } as unknown as Schema;
-  assert.deepEqual(openStatuses(schema).map(({ name, group }) => [name, group]), [["NORMAL Request", "NORMAL"], ["Normal", "NORMAL"], ["RUSH", "RUSH"], ["rush request", "RUSH"], ["SLOW", "SLOW"]]);
+  assert.deepEqual(openStatuses(schema).map(({ name, group }) => [name, group]), [["NORMAL Request", "NORMAL"], ["Normal", "NORMAL"], ["RUSH", "RUSH"], ["rush request", "RUSH"], ["SLOW", "SLOW"], ["Incomplete Request", "INCOMPLETE"]]);
 });
 
 test("the fetch receiver: Notion is called as a plain function, in every path that reads orders", async () => {
@@ -133,7 +133,7 @@ test("an order: page link, fields, names from the saved schema, requesters and n
   assert.equal(body.refreshing, false);
   assert.equal(body.truncated, false);
   assert.equal(body.skippedRows, 0);
-  assert.deepEqual(body.statuses, [{ name: "NORMAL Request", group: "NORMAL" }, { name: "RUSH", group: "RUSH" }]);
+  assert.deepEqual(body.statuses, [{ name: "NORMAL Request", group: "NORMAL" }, { name: "Incomplete Request", group: "INCOMPLETE" }, { name: "RUSH", group: "RUSH" }]);
   assert.equal(body.refreshError, null);
   assert.ok(body.fetchedMs > 0);
 });
@@ -170,7 +170,7 @@ test("rows that are not open orders are dropped and counted, even if Notion igno
   const key = await ready();
   answerWith(
     row(1),
-    row(2, { status: { id: "incomplete", name: "Incomplete Request" } }), // Filter ignored: this must not reach a cart.
+    row(2, { status: { id: "ordered", name: "Ordered" } }), // Filter ignored: this must not reach a cart.
     row(3, { status: { id: "gone", name: "Ordered" } }),
     row(4, { status: null }),
     { ...row(5), id: "not-an-id" },
