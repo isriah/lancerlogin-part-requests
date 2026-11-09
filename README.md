@@ -45,7 +45,8 @@ All under `/public/part-requests`, through the dashboard address plus `/api`. Ex
 | Route | Body | Result |
 | --- | --- | --- |
 | `POST /pair` | `{ pin, deviceLabel? }` | `201 { deviceKey, memberName }` |
-| `GET /options` | | `{ memberName, teams, recipients, defaultRecipientId, statuses, vendors, recipientsUpdatedMs }` |
+| `GET /options` | | `{ memberName, teams, recipients, defaultRecipientId, statuses, vendors, recipientsUpdatedMs, minimumExtensionVersion, updateUrl, databaseLink }`. See below. |
+| `POST /devices/self/revoke` | None | `200 { revoked: true }`. See below. |
 | `POST /recipient` | `{ notionUserId }`, or `null` to clear | Saves this member's default person. |
 | `POST /check` | `{ url, sku? }` | `{ repeats }`: the same product requested by anyone in the last 7 days. It never blocks. |
 | `POST /requests` | `{ submissionId, draft }` | See below. |
@@ -53,6 +54,24 @@ All under `/public/part-requests`, through the dashboard address plus `/api`. Ex
 | `POST /ping` | `{ echo }` | The Phase 0 test route. |
 
 `draft` has exactly these fields: `description`, `status`, `url`, `sku`, `team` (an option ID), `recipient` (a Notion user ID), `quantity`, `price`, `currencyConfirmed`. Use `""` and `null` for what an Incomplete request leaves out. The vendor always comes from the URL.
+
+### What `GET /options` adds for the extension
+
+- **`minimumExtensionVersion`** and **`updateUrl`** are constants in `src/requests.ts`. An older extension still works, and shows a notice with the link.
+- **`databaseLink`** is a `https://www.notion.so/<id>` link built from the saved database ID, for the "Check ordering database" link after an uncertain result.
+
+`/options` answers `503` while the Notion connection is down, so none of these change until it is back.
+
+### Revoking a device from itself
+
+`POST /devices/self/revoke` ends the key that sends it and frees one of the member's 5 slots. It takes no body, and needs no Admin.
+
+- **It is idempotent.** A key that is already revoked, by itself or by an Admin, gets `200 { revoked: true }` again, and the first revocation time stays. Every other route answers that key with `401 pair_again`.
+- **Leaving the roster does not block it,** so a member off the roster can still give up the slot.
+- **A key that isn't a device** gets `401 pair_again`, and nothing changes.
+- **It counts as one of the 120 other writes,** so it can answer `429 rate_limited`. Nothing is revoked then.
+
+The device shows on the Admin page as revoked, like one an Admin revoked. The audit log records `part_requests.device_self_revoked` with no actor, because nobody is signed in.
 
 ### Results of `POST /requests`
 
@@ -72,7 +91,7 @@ The extension creates `submissionId` (a lowercase UUID) when a request starts an
 | `503` | `code: "notion_not_connected"`, `"notion_schema_changed"`, `"credentials_unavailable"` or `"credentials_unreadable"` | An Admin has to act. Nothing was recorded. |
 | `503` | `code: "update_maintenance"` | See below. |
 
-Rate limits are per device, in 10-minute windows: 30 creates, and 120 other writes (`/check` and `/recipient`). `GET` routes are not counted, because they make no Notion call and should not write during maintenance. `/pair` allows 20 wrong PINs per client address when one is available, and 200 across the installation, then pauses for 15 minutes with `429 pairing_paused`.
+Rate limits are per device, in 10-minute windows: 30 creates, and 120 other writes (`/check`, `/recipient` and `/devices/self/revoke`). `GET` routes are not counted, because they make no Notion call and should not write during maintenance. `/pair` allows 20 wrong PINs per client address when one is available, and 200 across the installation, then pauses for 15 minutes with `429 pairing_paused`.
 
 ### Maintenance
 

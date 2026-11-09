@@ -2,10 +2,11 @@
 import test, { afterEach, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
-import { createHarness, dashboard, discordB, goodDraft, testCredentials, type Harness } from "./helpers/harness.ts";
+import { createHarness, dashboard, discordA, discordB, goodDraft, testCredentials, type Harness } from "./helpers/harness.ts";
 import { dataSource, dataSourceId, databaseId, guestPerson, memberPerson, namelessGuest, notionResponse, otherDataSourceId, stubNotion, testToken, type Stub } from "./helpers/notion-stub.ts";
-import { maximumCreates, maximumGeneral, pendingLimitMs, repeatWindowMs } from "../src/requests.ts";
-import { clientAddress, exchangePin, issuePin, maximumWrongPins, maximumWrongPinsPerAddress, pairingPauseMs, workerSubrequestAddress } from "../src/pairing.ts";
+import { groupDevices } from "../src/dashboard/part-requests-model.ts";
+import { maximumCreates, maximumGeneral, minimumExtensionVersion, pendingLimitMs, repeatWindowMs } from "../src/requests.ts";
+import { clientAddress, deviceLimitMessage, exchangePin, issuePin, maximumDevicesPerMember, maximumWrongPins, maximumWrongPinsPerAddress, pairingPauseMs, workerSubrequestAddress } from "../src/pairing.ts";
 
 const sdk = new URL("./helpers/module-sdk-stub.ts", import.meta.url).href;
 registerHooks({ resolve: (specifier, context, next) => specifier === "@lancerlogin/module-sdk/api" ? { url: sdk, shortCircuit: true } : next(specifier, context) });
@@ -18,6 +19,7 @@ afterEach(() => { stub.restore(); });
 
 const uuid = () => crypto.randomUUID();
 const send = (key: string, submissionId: string, draft: Record<string, unknown> = goodDraft()) => h.call("POST", "/public/part-requests/requests", { key, body: { submissionId, draft } });
+const revoke = (key: string) => h.call("POST", "/public/part-requests/devices/self/revoke", { key });
 const pageCalls = () => stub.calls.filter((call) => call.url.endsWith("/pages")).length;
 const ready = async () => { await h.connect(); stub.calls.length = 0; return h.pair(); };
 const row = (id: string) => h.test.rows<any>("SELECT * FROM part_requests_submissions WHERE id=?", id)[0];
@@ -167,6 +169,124 @@ test("options: teams, recipients and the member's default, only for a paired dev
   assert.equal(options.body.vendors.length, 20);
   assert.equal(options.text.includes("student.a@example.test"), false);
   for (const init of [{}, { key: "x".repeat(43) }]) assert.equal((await h.call("GET", "/public/part-requests/options", init)).body.code, "pair_again");
+});
+
+test("options: the extension's minimum version, its update link and the database link, built from the saved ID", async () => {
+  const key = await ready();
+  const { body, text } = await h.call("GET", "/public/part-requests/options", { key });
+  assert.equal(body.minimumExtensionVersion, "0.2.0");
+  assert.equal(body.minimumExtensionVersion, minimumExtensionVersion);
+  assert.equal(body.updateUrl, "https://github.com/isriah/lancerlogin-part-requests-extension/releases");
+  assert.equal(body.databaseLink, `https://www.notion.so/${databaseId.replaceAll("-", "")}`);
+  assert.equal(new URL(body.databaseLink).hostname, "www.notion.so");
+  assert.ok(!text.includes(testToken));
+});
+
+test("self-revoke: frees one of the 5 slots, and leaves the member's other devices and other members alone", async () => {
+  const keys = [await ready()];
+  for (let index = 2; index <= maximumDevicesPerMember; index++) keys.push(await h.pair(undefined, `Test laptop ${index}`));
+  const other = await h.pair(discordB);
+  const atLimit = await issuePin(h.db, discordA, Date.now());
+  assert.equal(atLimit, deviceLimitMessage);
+  const result = await revoke(keys[0]!);
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body, { revoked: true });
+  assert.match(await issuePin(h.db, discordA, Date.now()), /\*\*[A-Z0-9]{4}-[A-Z0-9]{4}\*\*/, "a slot is free again");
+  assert.ok(await h.pair(undefined, "Test replacement"));
+  assert.equal(await issuePin(h.db, discordA, Date.now()), deviceLimitMessage, "and it was only one slot");
+  for (const key of keys.slice(1)) assert.equal((await h.call("GET", "/public/part-requests/options", { key })).status, 200, "the member's other devices still work");
+  assert.equal((await h.call("GET", "/public/part-requests/options", { key: other })).status, 200, "another member's device still works");
+  assert.equal(h.test.rows("SELECT * FROM part_requests_devices WHERE revoked_ms IS NOT NULL").length, 1);
+});
+
+test("self-revoke: a revoked key gets pair_again on every other route, and nothing reaches Notion", async () => {
+  const key = await ready();
+  await revoke(key);
+  const results = await Promise.all([
+    h.call("GET", "/public/part-requests/options", { key }), send(key, uuid()),
+    h.call("POST", "/public/part-requests/check", { key, body: { url: goodDraft().url } }),
+    h.call("POST", "/public/part-requests/recipient", { key, body: { notionUserId: null } }),
+    h.call("GET", `/public/part-requests/requests/${uuid()}`, { key }),
+    h.call("POST", "/public/part-requests/ping", { key, body: {} }),
+  ]);
+  for (const result of results) { assert.equal(result.status, 401); assert.equal(result.body.code, "pair_again"); }
+  assert.equal(pageCalls(), 0);
+});
+
+test("self-revoke: repeating it gives the same answer and keeps the first time, one audit row and one slot", async () => {
+  const key = await ready();
+  assert.equal((await revoke(key)).status, 200);
+  h.test.run("UPDATE part_requests_devices SET revoked_ms=12345");
+  const again = await revoke(key);
+  assert.equal(again.status, 200);
+  assert.deepEqual(again.body, { revoked: true });
+  assert.equal(h.test.rows<{ revoked_ms: number }>("SELECT revoked_ms FROM part_requests_devices")[0]!.revoked_ms, 12345);
+  const audit = h.test.rows<{ actor_user_id: string | null; target_id: string }>("SELECT actor_user_id,target_id FROM audit_log WHERE action='part_requests.device_self_revoked'");
+  assert.equal(audit.length, 1);
+  assert.equal(audit[0]!.actor_user_id, null);
+  assert.equal(audit[0]!.target_id, h.test.rows<{ id: string }>("SELECT id FROM part_requests_devices")[0]!.id);
+});
+
+test("self-revoke: needs a key, an unknown key changes nothing, and other methods are not routes", async () => {
+  const key = await ready();
+  for (const init of [{}, { key: "x".repeat(43) }, { headers: { authorization: "Bearer short" } }]) {
+    const refused = await h.call("POST", "/public/part-requests/devices/self/revoke", init);
+    assert.equal(refused.status, 401);
+    assert.equal(refused.body.code, "pair_again");
+  }
+  assert.equal((await h.call("GET", "/public/part-requests/devices/self/revoke", { key })).status, 404);
+  assert.equal(h.test.rows("SELECT * FROM part_requests_devices WHERE revoked_ms IS NOT NULL").length, 0);
+  assert.equal(h.test.rows("SELECT * FROM part_requests_device_limits").length, 0, "nothing is counted for a key that is not a device");
+});
+
+test("self-revoke: a member off the roster can still give up the slot, which stays free when they rejoin", async () => {
+  const key = await ready();
+  h.test.run("UPDATE members SET active=0 WHERE id='m-a'");
+  assert.equal((await revoke(key)).status, 200);
+  h.test.run("UPDATE members SET active=1 WHERE id='m-a'");
+  assert.equal((await h.call("GET", "/public/part-requests/options", { key })).body.code, "pair_again", "rejoining restores other devices, not this one");
+});
+
+test("self-revoke: counts in the device's general write limit, without touching another device's", async () => {
+  const key = await ready();
+  const second = await h.pair(undefined, "Test second laptop");
+  h.test.run("INSERT INTO part_requests_device_limits(installation_id,device_id,bucket,window_start_ms,requests) SELECT installation_id,id,'general',?,? FROM part_requests_devices WHERE label='Browser extension'", Date.now(), maximumGeneral);
+  const limited = await revoke(key);
+  assert.equal(limited.status, 429);
+  assert.equal(limited.body.code, "rate_limited");
+  assert.ok(Number(limited.headers.get("retry-after")) > 0);
+  assert.equal((await h.call("GET", "/public/part-requests/options", { key })).status, 200, "a limited call revokes nothing");
+  assert.equal((await revoke(second)).status, 200);
+  h.test.run("UPDATE part_requests_device_limits SET window_start_ms=window_start_ms-600000");
+  assert.equal((await revoke(key)).status, 200, "it works after the window");
+});
+
+test("self-revoke: the Admin devices tab shows it as revoked like any other, and the slot is free in its count", async () => {
+  const key = await ready();
+  const other = await h.pair(undefined, "Test other laptop");
+  const started = Date.now();
+  await revoke(key);
+  const { body } = await h.call("GET", "/admin/part-requests/devices");
+  assert.equal(body.devices.length, 2);
+  const [group] = groupDevices(body.devices, body.limitPerMember);
+  assert.equal(group!.badge.label, "1 of 5 devices");
+  assert.equal(group!.devices.at(-1)!.label, "Browser extension", "revoked devices sort last");
+  assert.ok(group!.devices.at(-1)!.revokedMs! >= started);
+  assert.equal(group!.devices[0]!.revokedMs, null);
+  assert.equal((await h.admin("GET", "/status")).body.pairedDevices, 1);
+  const deviceId = group!.devices.at(-1)!.id;
+  assert.equal((await h.call("POST", "/admin/part-requests/devices/revoke", { origin: dashboard, body: { deviceId } })).status, 404, "an Admin page opened earlier gets the existing answer");
+  assert.equal((await h.call("GET", "/public/part-requests/options", { key: other })).status, 200);
+});
+
+test("query counts: self-revoke is a read, a count and one batch; repeating it skips the batch", async () => {
+  const key = await ready();
+  h.state.queries = 0;
+  assert.equal((await revoke(key)).status, 200);
+  assert.equal(h.state.queries, 3);
+  h.state.queries = 0;
+  assert.equal((await revoke(key)).status, 200);
+  assert.equal(h.state.queries, 2);
 });
 
 test("a member's chosen person becomes their default, only for themselves, and must be on the list", async () => {

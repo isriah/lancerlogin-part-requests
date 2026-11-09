@@ -5,7 +5,7 @@
 // stopped without an answer (the client can disconnect mid-request), so it reads as uncertain and is never sent again.
 import { connectionProblem, parseSchema, readConnection, savedToken, type Credentials } from "./connection.ts";
 import { json, object, refuse } from "./http.ts";
-import { AppError, NotionClient, pagePayload, parseDraft, statusIncomplete, statusNormal, validateDraft, type RequestDraft } from "./notion.ts";
+import { AppError, databaseLink, NotionClient, pagePayload, parseDraft, statusIncomplete, statusNormal, validateDraft, type RequestDraft } from "./notion.ts";
 import { deviceKeyHash, deviceRefusedMessage, installationId, readDevice, sha256Hex, type AuthenticatedDevice, type Database } from "./pairing.ts";
 import { productSkuKey, productUrlKey, vendorForUrl, vendors } from "./vendors.ts";
 
@@ -17,6 +17,9 @@ export const maximumCreates = 30;
 export const maximumGeneral = 120;
 /** Longer than the Notion timeout, so a row this old has no request still working on it. */
 export const pendingLimitMs = 45_000;
+/** The oldest extension this plugin expects. Older ones still work, and show a notice with the update link. */
+export const minimumExtensionVersion = "0.2.0";
+export const extensionUpdateUrl = "https://github.com/isriah/lancerlogin-part-requests-extension/releases";
 
 const submissionIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const uncertainMessage = "Notion may or may not have created this request. Check the database before making a new request.";
@@ -57,7 +60,7 @@ const rateLimited = (count: Count, now: number) => {
 };
 
 /** Count one write for the device. Returns the refusal when it is over the limit. */
-async function consumeGeneral(db: Database, device: AuthenticatedDevice, now: number): Promise<Response | undefined> {
+async function consumeGeneral(db: Database, device: Pick<AuthenticatedDevice, "deviceId">, now: number): Promise<Response | undefined> {
   const count = await countStatement(db, device.deviceId, "general", now).first<Count>();
   return count && Number(count.requests) > maximumGeneral ? rateLimited(count, now) : undefined;
 }
@@ -83,7 +86,30 @@ export async function readOptions({ db, authorization }: DeviceRequest): Promise
     memberName: device.memberName, teams: parseSchema(connection)?.properties.team.options ?? [], recipients,
     defaultRecipientId: chosen && recipients.some((person) => person.id === chosen.id) ? chosen.id : null,
     statuses: [statusNormal, statusIncomplete], vendors: vendors.map((vendor) => vendor.label), recipientsUpdatedMs: refresh?.finishedMs ?? null,
+    minimumExtensionVersion, updateUrl: extensionUpdateUrl, databaseLink: connection?.databaseId ? databaseLink(connection.databaseId) : null,
   });
+}
+
+/**
+ * POST /public/part-requests/devices/self/revoke: the device gives up its own key, which frees one of the member's slots.
+ * It reads the key alone rather than through readDevice, because a key that is already revoked gets the same answer again, and
+ * a member off the roster can still give up a slot. An unknown key changes nothing.
+ */
+export async function revokeSelf({ db, authorization, now }: DeviceRequest): Promise<Response> {
+  const keyHash = await deviceKeyHash(authorization);
+  const own = keyHash ? await db.prepare("SELECT id AS deviceId,revoked_ms AS revokedMs FROM part_requests_devices WHERE installation_id=? AND key_hash=?").bind(installationId, keyHash).first<{ deviceId: string; revokedMs: number | null }>() : null;
+  if (!own) return pairAgain();
+  const limited = await consumeGeneral(db, own, now);
+  if (limited) return limited;
+  if (own.revokedMs === null) {
+    await db.batch([
+      db.prepare("UPDATE part_requests_devices SET revoked_ms=? WHERE installation_id=? AND id=? AND revoked_ms IS NULL").bind(now, installationId, own.deviceId),
+      // No person is signed in here, so there is no actor. The action says the device did this itself.
+      db.prepare("INSERT INTO audit_log(id,installation_id,actor_user_id,action,target_type,target_id,created_at) SELECT ?,?,NULL,?,?,?,? WHERE changes()=1")
+        .bind(crypto.randomUUID(), installationId, "part_requests.device_self_revoked", "part_requests_device", own.deviceId, new Date(now).toISOString()),
+    ]);
+  }
+  return json({ revoked: true });
 }
 
 /** POST /public/part-requests/recipient: { notionUserId } saves this member's default person, null clears it. */

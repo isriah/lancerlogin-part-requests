@@ -52,6 +52,9 @@ const fields: Readonly<Record<Field, { readonly name: string; readonly types: re
 const notionHosts = ["notion.so", "notion.com", "notion.site"];
 const onNotionHost = (hostname: string) => notionHosts.some((host) => hostname === host || hostname.endsWith(`.${host}`));
 
+/** A link to the database from its saved ID. Notion redirects it to wherever the workspace lives. */
+export const databaseLink = (databaseId: string) => `https://www.notion.so/${databaseId.replaceAll("-", "")}`;
+
 /** Notion reports the same property ID encoded in some places and plain in others. */
 export function decodedId(id: unknown): string {
   try { return decodeURIComponent(String(id)); } catch { return String(id); }

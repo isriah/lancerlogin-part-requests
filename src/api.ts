@@ -6,7 +6,7 @@ import { setupRoute, stepSql, type AdminRouteContext } from "./connection.ts";
 import { json, object, refuse } from "./http.ts";
 import { authenticateDevice, clientAddress, deviceRefusedMessage, exchangePin, installationId, issuePin, type Database } from "./pairing.ts";
 import { refreshRecipients } from "./recipients.ts";
-import { checkRepeats, createRequest, readOptions, readRequest, saveRecipient, type DeviceRequest } from "./requests.ts";
+import { checkRepeats, createRequest, readOptions, readRequest, revokeSelf, saveRecipient, type DeviceRequest } from "./requests.ts";
 
 const database = (db: D1Database) => db as unknown as Database;
 const prefix = "/public/part-requests";
@@ -29,6 +29,7 @@ async function publicRoute(context: ModuleRouteContext<unknown>): Promise<Respon
   }
   const device: DeviceRequest = { db, authorization: context.request.headers.get("authorization"), credentials: context.services.credentials, now: Date.now() };
   if (pathname === `${prefix}/options` && method === "GET") return readOptions(device);
+  if (pathname === `${prefix}/devices/self/revoke` && method === "POST") return revokeSelf(device);
   if (pathname === `${prefix}/recipient` && method === "POST") return saveRecipient(device, await context.json(1024));
   if (pathname === `${prefix}/check` && method === "POST") return checkRepeats(device, await context.json(8192));
   if (pathname === `${prefix}/requests` && method === "POST") return createRequest(device, await context.json(32_768));
