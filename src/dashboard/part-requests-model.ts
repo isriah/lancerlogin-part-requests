@@ -19,7 +19,8 @@ export type Device = {
   readonly id: string; readonly label: string; readonly memberId: string; readonly memberName: string; readonly memberActive: boolean;
   readonly createdMs: number; readonly lastUsedMs: number | null; readonly revokedMs: number | null;
 };
-export type DeviceList = { readonly devices: readonly Device[]; readonly limitPerMember: number };
+export type RosterPerson = { readonly id: string; readonly name: string };
+export type DeviceList = { readonly devices: readonly Device[]; readonly limitPerMember: number; readonly roster: readonly RosterPerson[]; readonly rosterLimited: boolean };
 
 // ---- Sections of the settings page
 export const adminSections = [["connection", "Connection"], ["requests", "Requests log"], ["devices", "Paired devices"]] as const;
@@ -73,21 +74,93 @@ export function requestRow(request: Pick<LoggedRequest, "state" | "pageUrl" | "f
 }
 
 // ---- Paired devices
-export type MemberDevices = { readonly memberId: string; readonly memberName: string; readonly badge: Badge; readonly devices: readonly Device[] };
+export type MemberRow = {
+  readonly id: string; readonly name: string; readonly active: boolean;
+  /** Working devices first, oldest first, then revoked ones. */
+  readonly devices: readonly Device[]; readonly working: readonly Device[];
+  /** Latest use of a working device, or of any device when none is working. 0 for never. */
+  readonly lastUsedMs: number;
+  /** Days since a working device was last used, or paired if never used. 0 for a member with no working device or off the roster. */
+  readonly idleDays: number;
+};
 
-/** Devices grouped by member, by name. Within a member, working devices come first, oldest first. */
-export function groupDevices(devices: readonly Device[], limit: number): readonly MemberDevices[] {
-  const members = new Map<string, Device[]>();
-  for (const device of devices) { const group = members.get(device.memberId); if (group) group.push(device); else members.set(device.memberId, [device]); }
-  return [...members.values()].map((group) => {
-    const first = group[0]!;
-    const open = group.filter((device) => device.revokedMs === null).length;
-    const badge: Badge = !first.memberActive ? { label: `Not on the active roster, so ${open === 1 ? "this device has" : "these devices have"} no access`, tone: "neutral" }
-      : open >= limit ? { label: `${open} of ${limit} devices, at the limit`, tone: "warning" }
-      : { label: `${open} of ${limit} devices`, tone: "neutral" };
-    const ordered = [...group].sort((a, b) => Number(a.revokedMs !== null) - Number(b.revokedMs !== null) || a.createdMs - b.createdMs);
-    return { memberId: first.memberId, memberName: first.memberName, badge, devices: ordered };
-  }).sort((a, b) => a.memberName.localeCompare(b.memberName));
+const dayMs = 86_400_000;
+export const inactiveDays = 30;
+
+/** One row per member, by name: everyone on the active roster, and anyone else with a device, such as a member who left it. */
+export function memberRows(list: Pick<DeviceList, "devices" | "roster">, now: number): readonly MemberRow[] {
+  const people = new Map<string, { name: string; active: boolean; devices: Device[] }>();
+  for (const person of list.roster) people.set(person.id, { name: person.name, active: true, devices: [] });
+  for (const device of list.devices) {
+    const person = people.get(device.memberId);
+    if (person) { person.devices.push(device); person.active = device.memberActive; }
+    else people.set(device.memberId, { name: device.memberName, active: device.memberActive, devices: [device] });
+  }
+  return [...people].map(([id, { name, active, devices }]) => {
+    const ordered = [...devices].sort((a, b) => Number(a.revokedMs !== null) - Number(b.revokedMs !== null) || a.createdMs - b.createdMs);
+    const working = ordered.filter((device) => device.revokedMs === null);
+    const lastUsedMs = Math.max(0, ...(working.length ? working : ordered).map((device) => device.lastUsedMs ?? 0));
+    const idleFrom = lastUsedMs || Math.max(0, ...working.map((device) => device.createdMs));
+    return { id, name, active, devices: ordered, working, lastUsedMs, idleDays: active && working.length ? Math.floor((now - idleFrom) / dayMs) : 0 };
+  }).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export const memberFilters = [["all", "All"], ["none", "No devices"], ["limit", "At the limit"], ["idle", `Inactive ${inactiveDays}+ days`], ["off", "Off roster"]] as const;
+export type MemberFilter = (typeof memberFilters)[number][0];
+
+export function inFilter(row: MemberRow, filter: MemberFilter, limit: number): boolean {
+  if (filter === "none") return row.active && !row.working.length;
+  if (filter === "limit") return row.active && row.working.length >= limit;
+  if (filter === "idle") return row.idleDays >= inactiveDays;
+  return filter === "off" ? !row.active : true;
+}
+
+const includes = (value: string, text: string) => value.toLowerCase().includes(text);
+
+/** The rows a filter and search leave: by name so they stay put when a device is revoked, except Inactive, longest idle first. */
+export function visibleMembers(rows: readonly MemberRow[], filter: MemberFilter, search: string, limit: number): readonly MemberRow[] {
+  const text = search.trim().toLowerCase();
+  const found = rows.filter((row) => inFilter(row, filter, limit) && (!text || includes(row.name, text) || row.devices.some((device) => includes(device.label, text))));
+  return filter === "idle" ? [...found].sort((a, b) => b.idleDays - a.idleDays) : found;
+}
+
+/** The devices a search found on a member whose name it did not match, so the row says why it is there. */
+export function searchMatches(row: MemberRow, search: string): readonly string[] {
+  const text = search.trim().toLowerCase();
+  return !text || includes(row.name, text) ? [] : row.devices.filter((device) => includes(device.label, text)).map((device) => device.label);
+}
+
+/** Devices counts working devices, the same number as the Pairing card, so it includes off roster devices that have no access. */
+export function deviceSummary(rows: readonly MemberRow[]) {
+  const onRoster = rows.filter((row) => row.active);
+  const paired = onRoster.filter((row) => row.working.length).length;
+  const devices = rows.reduce((total, row) => total + row.working.length, 0);
+  const offRosterDevices = rows.reduce((total, row) => total + (row.active ? 0 : row.working.length), 0);
+  return { paired, onRoster: onRoster.length, none: onRoster.length - paired, devices, offRosterDevices };
+}
+
+export function memberFlag(row: MemberRow, limit: number): Badge | undefined {
+  if (!row.active) return { label: "Off roster", tone: "neutral" };
+  if (!row.working.length) return { label: "No devices", tone: "neutral" };
+  if (row.working.length >= limit) return { label: "At the limit", tone: "warning" };
+  return row.idleDays >= inactiveDays ? { label: `Inactive ${row.idleDays} days`, tone: "neutral" } : undefined;
+}
+
+export const memberLastUsed = (row: MemberRow, timeZone?: string) => row.lastUsedMs ? `Last used ${formatShortDate(row.lastUsedMs, timeZone)}` : row.devices.length ? "Never used" : "Not paired";
+
+export const offRosterNote = (row: MemberRow) => `Not on the active roster, so ${row.working.length === 1 ? "this device has" : "these devices have"} no access.`;
+
+export const inactiveNote = "Inactive is a prompt to look, not a reason to revoke. Last used only changes when a device sends a request or marks a cart item, so a member who needed no parts reads as inactive, and everyone will in the off-season.";
+
+export const rosterLimitedNote = "The roster stops at 500 members, and this team has at least that many, so the No devices list and the roster counts may be incomplete.";
+
+export function emptyMembersText(filter: MemberFilter, search: string, limit: number): string {
+  const label = memberFilters.find(([id]) => id === filter)![1];
+  if (search.trim()) return `No members match "${search.trim()}"${filter === "all" ? "." : ` in ${label}.`}`;
+  if (filter === "none") return "Every member on the roster has a working device.";
+  if (filter === "limit") return `No members are at the limit of ${limit} devices.`;
+  if (filter === "idle") return `No members have gone ${inactiveDays} days without using a device.`;
+  return filter === "off" ? "No devices belong to members off the roster." : "No members yet. They appear here once they are on the roster.";
 }
 
 export const revokeMessage = (device: Pick<Device, "label" | "memberName">) =>

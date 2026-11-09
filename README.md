@@ -14,7 +14,7 @@ Students click a browser extension on a vendor's product page, review the detail
 
 - **Connection:** any problem and its fix at the top, then the Notion connection and its token, with Replace and Remove, the data source, last verified time, site address and Open setup, which reopens Core's setup screen; the repair fields whenever requests have stopped, as Core does not reopen setup by itself after a token is removed; the recipient list with Refresh now; pairing, with a notice while it is paused; and the Carts switch. One Verify button saves the token and checks the database together. Old `?section=setup` and `?section=status` links open this section.
 - **Requests log:** every request with its member and device, newest first, with a banner when any result is uncertain.
-- **Paired devices:** grouped by member, with Revoke. It also shows a member at the limit of 5 and a member who left the active roster.
+- **Paired devices:** counts, search by name or device, and filters for No devices, At the limit, Inactive 30+ days and Off roster, then one compact row per member by name, including members with no devices. A row opens to that member's devices, with Revoke. Inactive is a prompt to look, not a reason to revoke: last used only changes when a device sends a request or marks a cart item.
 
 Core shows its own setup screen by itself until setup is complete, and an Admin can reopen it from Connection. Core keeps a module open once its setup is complete, so replacing or removing the token later stops requests without closing these pages.
 
@@ -170,7 +170,7 @@ Under `/admin/part-requests`, Admin only. Core requires a capability marked for 
 | Route | Result |
 | --- | --- |
 | `GET /requests?limit=&before=` | `{ requests, nextBefore, uncertainCount }`, newest first. Each shows the member, device, state and request details. `uncertainCount` covers the whole log, not just this page. |
-| `GET /devices` | `{ devices, limitPerMember }`: label, member, created, last used and revoked. No key material. |
+| `GET /devices` | `{ devices, limitPerMember, roster, rosterLimited }`. `devices`: label, member, created, last used and revoked, with no key material. `roster`: the active roster, each person's `id` and `name` only, never their email or external ID. Core's projection stops at 500 members, so `rosterLimited` is true at exactly 500 and the page says the No devices list may be incomplete. |
 | `POST /devices/revoke` | `{ deviceId }` ends that device's access at once. |
 | `POST /recipients/refresh` | Runs the recipient refresh now. |
 

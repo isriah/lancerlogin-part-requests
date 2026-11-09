@@ -1,13 +1,13 @@
 // Settings > Modules > Part Requests, Admin only: Connection, Requests log and Paired devices.
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { SettingsSectionNavigation, settingsSectionHref, usePath } from "@lancerlogin/module-sdk/dashboard";
 import { ConnectionCard, useSetupStatus } from "./part-requests-connection";
 import { adminRoute, errorText, request, setupRoute } from "./part-requests-http.ts";
 import {
-  adminSection, adminSections, formatDate, formatDateTime, formatShortDate, groupDevices, isConnected, pairingNotice, refreshNotice, requestRow, revokeMessage, uncertainBanner,
-  type AdminSection, type Device, type DeviceList, type LoggedRequest, type RequestLogPage, type SetupStatus,
+  adminSection, adminSections, deviceSummary, emptyMembersText, formatDate, formatDateTime, formatShortDate, inactiveDays, inactiveNote, inFilter, isConnected, memberFilters, memberFlag, memberLastUsed, memberRows, offRosterNote, pairingNotice, refreshNotice, requestRow, revokeMessage, rosterLimitedNote, searchMatches, uncertainBanner, visibleMembers,
+  type AdminSection, type Device, type MemberFilter, type MemberRow, type DeviceList, type LoggedRequest, type RequestLogPage, type SetupStatus,
 } from "./part-requests-model.ts";
-import { ConfirmDialog, LoadState, Notice, Pill } from "./part-requests-ui";
+import { ConfirmDialog, Field, fieldAria, LoadState, Notice, Pill } from "./part-requests-ui";
 
 export function PartRequestsSettings({ openSetup }: { openSetup: () => void }) {
   const { path, search, navigate } = usePath();
@@ -83,6 +83,37 @@ function RequestsLog({ databaseId }: { databaseId: string | null }) {
   </>;
 }
 
+function MemberListRow({ row, limit, search, open, onToggle, onRevoke }: { row: MemberRow; limit: number; search: string; open: boolean; onToggle: () => void; onRevoke: (device: Device) => void }) {
+  const flag = memberFlag(row, limit);
+  const matches = searchMatches(row, search);
+  const cells = <>
+    <span className="pr-member-name">{row.name}{matches.length > 0 && <span className="pr-row-note">Matches {matches.join(", ")}</span>}</span>
+    <span className="pr-member-flag">{flag && <Pill badge={flag} />}</span>
+    <span className="pr-member-meta"><span className="pr-member-count">{row.working.length} of {limit} devices</span><span className="pr-member-last">{memberLastUsed(row)}</span></span>
+  </>;
+  if (!row.devices.length) return <li><div className="pr-member-row">{cells}</div></li>;
+  const panel = `pr-member-${row.id}`;
+  return <li>
+    <button className="pr-member-row" type="button" aria-expanded={open} aria-controls={panel} onClick={onToggle}>{cells}<span className="pr-member-sign" aria-hidden="true" /></button>
+    <div className="pr-member-panel" id={panel} hidden={!open}>{open && <>
+      {!row.active && <p className="field-help">{offRosterNote(row)}</p>}
+      {row.idleDays >= inactiveDays && <p className="field-help">{inactiveNote}</p>}
+      <div className="responsive-table"><table className="ui-table pr-table pr-devices">
+        <caption className="visually-hidden">{row.name}'s devices</caption>
+        <thead><tr><th scope="col">Device</th><th scope="col">Paired</th><th scope="col">Last used</th><th scope="col"><span className="visually-hidden">Actions</span></th></tr></thead>
+        <tbody>{row.devices.map((device) => <tr key={device.id} data-revoked={device.revokedMs !== null ? "true" : undefined}>
+          <td data-label="Device">{device.label}</td>
+          <td data-label="Paired">{formatDate(device.createdMs)}</td>
+          <td data-label="Last used">{device.lastUsedMs ? formatDateTime(device.lastUsedMs) : "Never"}</td>
+          <td className="pr-device-action" data-label="Action">{device.revokedMs !== null
+            ? <Pill badge={{ label: `Revoked ${formatShortDate(device.revokedMs)}`, tone: "neutral" }} />
+            : <button className="ui-button ui-button--danger" type="button" aria-label={`Revoke ${row.name}'s ${device.label}`} onClick={() => onRevoke(device)}>Revoke</button>}</td>
+        </tr>)}</tbody>
+      </table></div>
+    </>}</div>
+  </li>;
+}
+
 function PairedDevices() {
   const [list, setList] = useState<DeviceList>();
   const [error, setError] = useState("");
@@ -91,6 +122,10 @@ function PairedDevices() {
   const [busy, setBusy] = useState(false);
   const [revokeError, setRevokeError] = useState("");
   const [revoked, setRevoked] = useState<{ text: string; key: number }>();
+  const [filter, setFilter] = useState<MemberFilter>("all");
+  const [search, setSearch] = useState("");
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
+  const searchField = useRef<HTMLInputElement>(null);
   async function load() {
     setError(""); setLoading(true);
     try { setList(await request<DeviceList>(`${adminRoute}/devices`)); }
@@ -109,29 +144,35 @@ function PairedDevices() {
     } catch (caught) { setRevokeError(errorText(caught, "The device could not be revoked.")); }
     finally { setBusy(false); }
   }
-  const groups = list ? groupDevices(list.devices, list.limitPerMember) : [];
+  const limit = list?.limitPerMember ?? 5;
+  const rows = useMemo(() => list ? memberRows(list, Date.now()) : [], [list]);
+  const summary = deviceSummary(rows);
+  const shown = visibleMembers(rows, filter, search, limit);
+  const toggle = (id: string) => setExpanded((current) => { const next = new Set(current); if (!next.delete(id)) next.add(id); return next; });
   return <>
     {revoked
       ? <Notice notice={{ tone: "success", content: revoked.text }} focusKey={revoked.key} />
-      : <p className="ui-status settings-notice pr-notice" role="status">Members pair a device by running <code>/ordering-pin</code> in Discord, which privately replies with the site address and a PIN to enter in the extension. Each member can have up to {list?.limitPerMember ?? 5} devices.</p>}
+      : <p className="ui-status settings-notice pr-notice" role="status">Members pair a device by running <code>/ordering-pin</code> in Discord, which privately replies with the site address and a PIN to enter in the extension. Each member can have up to {limit} devices.</p>}
     <LoadState loading={loading && !list} error={error} label="paired devices" onRetry={() => void load()} />
-    {list && <section className={`ui-card${groups.length ? " pr-stack" : ""}`} aria-labelledby="pr-devices-title">
+    {list && <section className="ui-card pr-stack" aria-labelledby="pr-devices-title">
       <div className="pr-card-heading"><h2 id="pr-devices-title">Paired devices</h2></div>
-      {!groups.length && <p className="empty-state">No paired devices yet. They appear here after a member pairs one.</p>}
-      {groups.length > 0 && <div className="responsive-table"><table className="ui-table pr-table pr-devices">
-        <thead><tr><th scope="col">Device</th><th scope="col">Paired</th><th scope="col">Last used</th><th scope="col"><span className="visually-hidden">Actions</span></th></tr></thead>
-        {groups.map((group) => <tbody key={group.memberId}>
-          <tr className="pr-group"><th colSpan={4} scope="rowgroup"><span className="pr-group-heading"><span>{group.memberName}</span><Pill badge={group.badge} /></span></th></tr>
-          {group.devices.map((device) => <tr key={device.id} data-revoked={device.revokedMs !== null ? "true" : undefined}>
-            <td data-label="Device">{device.label}</td>
-            <td data-label="Paired">{formatDate(device.createdMs)}</td>
-            <td data-label="Last used">{device.lastUsedMs ? formatDateTime(device.lastUsedMs) : "Never"}</td>
-            <td className="pr-device-action" data-label="Action">{device.revokedMs !== null
-              ? <Pill badge={{ label: `Revoked ${formatShortDate(device.revokedMs)}`, tone: "neutral" }} />
-              : <button className="ui-button ui-button--danger" type="button" aria-label={`Revoke ${group.memberName}'s ${device.label}`} onClick={() => { setRevokeError(""); setTarget(device); }}>Revoke</button>}</td>
-          </tr>)}
-        </tbody>)}
-      </table></div>}
+      <dl className="pr-summary">
+        <div><dt>Members paired</dt><dd className="pr-summary-value">{summary.paired}</dd><dd className="pr-summary-note">of {summary.onRoster} on the active roster</dd></div>
+        <div><dt>Devices</dt><dd className="pr-summary-value">{summary.devices}</dd><dd className="pr-summary-note">{summary.offRosterDevices} {summary.offRosterDevices === 1 ? "is" : "are"} off roster and {summary.offRosterDevices === 1 ? "has" : "have"} no access</dd></div>
+        <div><dt>Members with none</dt><dd className="pr-summary-value">{summary.none}</dd><dd className="pr-summary-note">on the roster, no working device</dd></div>
+      </dl>
+      {list.rosterLimited && <p className="ui-status settings-notice pr-notice" data-tone="warning" role="status">{rosterLimitedNote}</p>}
+      <Field id="pr-device-search" label="Search by name or device"><input {...fieldAria("pr-device-search", undefined, false)} ref={searchField} className="ui-control" type="search" autoComplete="off" spellCheck={false} maxLength={200} value={search} onChange={(event) => setSearch(event.target.value)} /></Field>
+      <div className="pr-chips" role="group" aria-label="Filter members">{memberFilters.map(([id, label]) =>
+        <button className="pr-chip" type="button" key={id} aria-pressed={filter === id} onClick={() => setFilter(id)}>{label} <span className="pr-chip-count">{rows.filter((row) => inFilter(row, id, limit)).length}</span></button>)}</div>
+      {filter === "idle" && <p className="field-help pr-notice">{inactiveNote}</p>}
+      <p className="pr-result-count" role="status">Showing {shown.length} of {rows.length} members, {filter === "idle" ? "longest idle first." : "by name."}</p>
+      {shown.length > 0
+        ? <ul className="pr-member-list">{shown.map((row) => <MemberListRow key={row.id} row={row} limit={limit} search={search} open={expanded.has(row.id)} onToggle={() => toggle(row.id)} onRevoke={(device) => { setRevokeError(""); setTarget(device); }} />)}</ul>
+        : <div className="pr-member-list pr-empty-actions">
+          <p>{emptyMembersText(filter, search, limit)}</p>
+          {(filter !== "all" || search.trim() !== "") && <button className="ui-button" type="button" onClick={() => { setFilter("all"); setSearch(""); searchField.current?.focus(); }}>Clear filters</button>}
+        </div>}
     </section>}
     {target && <ConfirmDialog title={`Revoke ${target.label}?`} message={revokeMessage(target)} keepLabel="Keep device" confirmLabel="Revoke device" busy={busy} error={revokeError} onConfirm={() => void revoke()} onClose={() => setTarget(undefined)} />}
   </>;

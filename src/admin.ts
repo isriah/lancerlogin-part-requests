@@ -1,6 +1,7 @@
 // Data for the Admin pages: the request log and paired devices, with revoke and a manual refresh.
 // Core lets assigned Operators reach /admin/part-requests, because it requires a capability marked for Operators. Every
 // handler here still requires an Admin, so that capability grants nothing.
+import { listActiveRosterIdentities, type D1Database } from "@lancerlogin/module-sdk/api";
 import { requireAdmin, type AdminRouteContext } from "./connection.ts";
 import { json, object, refuse } from "./http.ts";
 import { installationId, maximumDevicesPerMember, type Database } from "./pairing.ts";
@@ -25,12 +26,25 @@ async function requestLog(context: AdminRouteContext, db: Database, now: number)
   return json({ requests: page, nextBefore: rows.length > limit ? page.at(-1)?.createdMs ?? null : null, uncertainCount: Number(uncertain?.count ?? 0) });
 }
 
-/** GET /devices: every paired device, revoked ones included, with no key material. */
+/** Core's roster projection stops here, with no paging and no total, so a full answer may have left people out. */
+export const rosterLimit = 500;
+
+/**
+ * GET /devices: every paired device, revoked ones included, with no key material, and the active roster, so a member with no
+ * device can be listed. Only each person's ID and name leave here: the projection also has their email and external ID.
+ */
 async function devices(db: Database) {
-  const rows = (await db.prepare(`SELECT d.id,d.label,d.member_id AS memberId,m.first_name AS firstName,m.last_name AS lastName,m.active AS memberActive,d.created_ms AS createdMs,d.last_used_ms AS lastUsedMs,d.revoked_ms AS revokedMs
+  const [deviceRows, roster] = await Promise.all([db.prepare(`SELECT d.id,d.label,d.member_id AS memberId,m.first_name AS firstName,m.last_name AS lastName,m.active AS memberActive,d.created_ms AS createdMs,d.last_used_ms AS lastUsedMs,d.revoked_ms AS revokedMs
     FROM part_requests_devices d JOIN members m ON m.installation_id=d.installation_id AND m.id=d.member_id WHERE d.installation_id=? ORDER BY d.revoked_ms IS NOT NULL,m.last_name COLLATE NOCASE,m.first_name COLLATE NOCASE,d.created_ms`)
-    .bind(installationId).all<{ id: string; label: string; memberId: string; firstName: string; lastName: string; memberActive: number; createdMs: number; lastUsedMs: number | null; revokedMs: number | null }>()).results ?? [];
-  return json({ limitPerMember: maximumDevicesPerMember, devices: rows.map(({ firstName, lastName, memberActive, ...row }) => ({ ...row, memberName: `${firstName} ${lastName}`.trim(), memberActive: memberActive === 1 })) });
+    .bind(installationId).all<{ id: string; label: string; memberId: string; firstName: string; lastName: string; memberActive: number; createdMs: number; lastUsedMs: number | null; revokedMs: number | null }>(),
+  listActiveRosterIdentities(db as unknown as D1Database, installationId)]);
+  const people = roster.results ?? [];
+  return json({
+    limitPerMember: maximumDevicesPerMember,
+    devices: (deviceRows.results ?? []).map(({ firstName, lastName, memberActive, ...row }) => ({ ...row, memberName: `${firstName} ${lastName}`.trim(), memberActive: memberActive === 1 })),
+    roster: people.map(({ id, firstName, lastName }) => ({ id, name: `${firstName} ${lastName}`.trim() })),
+    rosterLimited: people.length === rosterLimit,
+  });
 }
 
 /** POST /devices/revoke: { deviceId }. Ends that device's access at once. Its log entries stay. */

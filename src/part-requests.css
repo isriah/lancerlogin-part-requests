@@ -34,12 +34,46 @@
 :where([data-module="part-requests"]) .pr-row-note { display: block; margin-top: var(--space-1); color: var(--ui-text-muted); font-size: var(--text-small); font-weight: 400; line-height: 1.4; }
 :where([data-module="part-requests"]) .pr-none { color: var(--ui-text-muted); }
 :where([data-module="part-requests"]) .pr-pill-neutral { border: 1px solid var(--ui-border); color: var(--ui-text-muted); background: var(--ui-surface-subtle); }
-:where([data-module="part-requests"]) .pr-group th { background: var(--ui-surface-subtle); }
-:where([data-module="part-requests"]) .pr-devices th[scope="rowgroup"] { color: var(--ui-text); background: var(--ui-surface-subtle); font-size: var(--text-small); letter-spacing: normal; text-transform: none; }
-:where([data-module="part-requests"]) .pr-group-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2) var(--space-3); font-weight: 800; }
 :where([data-module="part-requests"]) .pr-devices tr[data-revoked="true"] td:first-child { color: var(--ui-text-muted); }
 :where([data-module="part-requests"]) .pr-devices td { vertical-align: middle; }
 :where([data-module="part-requests"]) .dialog-backdrop > .pr-dialog[role="dialog"] { width: min(38rem,100%); padding: var(--space-5); }
+
+/* Paired devices: a summary, search and filters, then one compact row per member that opens to their devices. */
+:where([data-module="part-requests"]) .pr-summary { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: var(--space-3); margin: 0; }
+:where([data-module="part-requests"]) .pr-summary > div { display: grid; align-content: start; gap: var(--space-1); min-width: 0; padding: var(--space-3) var(--space-4); border: 1px solid var(--ui-border); border-radius: var(--radius-card); background: var(--ui-surface-subtle); }
+:where([data-module="part-requests"]) .pr-summary dt { font-size: var(--text-small); font-weight: 750; }
+:where([data-module="part-requests"]) .pr-summary dd { margin: 0; }
+:where([data-module="part-requests"]) .pr-summary .pr-summary-value { font-size: var(--text-section-heading); font-weight: 800; line-height: 1.2; }
+:where([data-module="part-requests"]) .pr-summary .pr-summary-note { color: var(--ui-text-muted); font-size: var(--text-caption); line-height: 1.4; }
+:where([data-module="part-requests"]) .pr-chips { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+:where([data-module="part-requests"]) button.pr-chip { display: inline-flex; align-items: center; gap: var(--space-2); min-height: var(--control-min-block-size); padding: var(--space-2) var(--space-3); border: 1px solid var(--ui-border); border-radius: var(--radius-pill); color: var(--ui-text); background: var(--ui-surface-subtle); font-size: var(--text-small); font-weight: 750; line-height: 1.2; }
+:where([data-module="part-requests"]) button.pr-chip:hover { border-color: var(--primary); }
+:where([data-module="part-requests"]) button.pr-chip[aria-pressed="true"] { border-color: var(--ui-text); background: color-mix(in srgb,var(--primary) 22%,var(--ui-surface)); }
+:where([data-module="part-requests"]) button.pr-chip[aria-pressed="true"]::before { content: "\2713"; }
+:where([data-module="part-requests"]) .pr-chip-count { color: var(--ui-text-muted); font-weight: 700; }
+:where([data-module="part-requests"]) button.pr-chip[aria-pressed="true"] .pr-chip-count { color: var(--ui-text); }
+:where([data-module="part-requests"]) .pr-result-count { margin: 0; color: var(--ui-text-muted); font-size: var(--text-small); }
+:where([data-module="part-requests"]) .pr-member-list { margin: 0; padding: 0; overflow: hidden; border: 1px solid var(--ui-border); border-radius: var(--radius-card); list-style: none; }
+:where([data-module="part-requests"]) .pr-member-list > li + li { border-top: 1px solid var(--ui-border); }
+:where([data-module="part-requests"]) .pr-member-row { display: grid; grid-template-columns: minmax(0,1.3fr) minmax(0,1fr) 7rem 9.5rem 1.25rem; grid-template-areas: "name flag count last sign"; align-items: center; gap: var(--space-1) var(--space-3); width: 100%; min-height: var(--control-min-block-size); padding: var(--space-1) var(--space-3); }
+:where([data-module="part-requests"]) button.pr-member-row { border: 0; border-radius: 0; color: var(--ui-text); background: transparent; font-size: var(--text-body); font-weight: 400; text-align: left; }
+:where([data-module="part-requests"]) button.pr-member-row:hover { background: var(--ui-surface-subtle); }
+:where([data-module="part-requests"]) button.pr-member-row:focus-visible { outline: 3px solid var(--ui-focus); outline-offset: -3px; }
+:where([data-module="part-requests"]) .pr-member-name { grid-area: name; min-width: 0; font-size: .9rem; font-weight: 700; overflow-wrap: anywhere; }
+:where([data-module="part-requests"]) .pr-member-flag { grid-area: flag; min-width: 0; }
+:where([data-module="part-requests"]) .pr-member-flag .status-pill { min-height: 1.5rem; padding-block: 0; white-space: normal; }
+:where([data-module="part-requests"]) .pr-member-meta { display: contents; }
+:where([data-module="part-requests"]) .pr-member-count { grid-area: count; color: var(--ui-text-muted); font-size: var(--text-small); }
+:where([data-module="part-requests"]) .pr-member-last { grid-area: last; color: var(--ui-text-muted); font-size: var(--text-small); }
+:where([data-module="part-requests"]) .pr-member-sign { grid-area: sign; justify-self: end; font-weight: 700; }
+:where([data-module="part-requests"]) .pr-member-sign::after { content: "+"; }
+:where([data-module="part-requests"]) [aria-expanded="true"] > .pr-member-sign::after { content: "\2212"; }
+:where([data-module="part-requests"]) .pr-member-panel { border-top: 1px solid var(--ui-border); background: var(--ui-surface-subtle); }
+:where([data-module="part-requests"]) .pr-member-panel[hidden] { display: none; }
+:where([data-module="part-requests"]) .pr-member-panel .responsive-table { border: 0; border-radius: 0; }
+:where([data-module="part-requests"]) .pr-member-panel .field-help { margin: 0; padding: var(--space-3) var(--space-3) 0; }
+:where([data-module="part-requests"]) .pr-empty-actions { display: grid; justify-items: start; gap: var(--space-3); padding: var(--space-5) var(--space-4); }
+:where([data-module="part-requests"]) .pr-empty-actions p { margin: 0; }
 
 /* Connection tab: the cards below the Notion card, and label and value rows. */
 :where([data-module="part-requests"]) .pr-connection-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: var(--space-4); align-items: start; }
@@ -53,6 +87,16 @@
 :where([data-module="part-requests"]) .pr-notice-action > span { flex: 1 1 18rem; min-width: 0; }
 
 @media (max-width: 800px) {
+  :where([data-module="part-requests"]) .pr-summary { grid-template-columns: minmax(0,1fr); gap: var(--space-2); }
+  :where([data-module="part-requests"]) .pr-summary > div { grid-template-columns: minmax(0,1fr) auto; grid-template-areas: "label value" "note value"; align-items: center; column-gap: var(--space-3); padding: var(--space-2) var(--space-3); }
+  :where([data-module="part-requests"]) .pr-summary dt { grid-area: label; }
+  :where([data-module="part-requests"]) .pr-summary .pr-summary-value { grid-area: value; }
+  :where([data-module="part-requests"]) .pr-summary .pr-summary-note { grid-area: note; }
+  :where([data-module="part-requests"]) .pr-member-row { grid-template-columns: minmax(0,1fr) auto; grid-template-areas: "name sign" "flag flag" "meta meta"; padding: var(--space-2) var(--space-3); }
+  :where([data-module="part-requests"]) .pr-member-flag:empty { display: none; }
+  :where([data-module="part-requests"]) .pr-member-meta { display: flex; flex-wrap: wrap; gap: 0 var(--space-3); grid-area: meta; }
+  :where([data-module="part-requests"]) .pr-member-count,:where([data-module="part-requests"]) .pr-member-last { grid-area: auto; }
+  :where([data-module="part-requests"]) .pr-member-panel .pr-devices tbody tr { background: var(--ui-surface-subtle); }
   :where([data-module="part-requests"]) .pr-connection-grid { grid-template-columns: minmax(0,1fr); }
   :where([data-module="part-requests"]) .pr-connection-wide { grid-column: auto; }
   :where([data-module="part-requests"]) .pr-layout { grid-template-columns: minmax(0,1fr); }
@@ -65,8 +109,6 @@
   :where([data-module="part-requests"]) .pr-table td[data-label] { display: grid; grid-template-columns: minmax(6rem,32%) minmax(0,1fr); gap: var(--space-2); align-items: center; }
   :where([data-module="part-requests"]) .pr-table td[data-label]::before { content: attr(data-label); color: var(--ui-text-muted); font-size: var(--text-caption); font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
   :where([data-module="part-requests"]) .pr-time { white-space: normal; }
-  :where([data-module="part-requests"]) .pr-group-heading .status-pill { white-space: normal; }
-  :where([data-module="part-requests"]) .pr-devices tbody tr.pr-group { padding: var(--space-3); background: var(--ui-surface-subtle); }
   :where([data-module="part-requests"]) .pr-devices td.pr-device-action::before { display: none; }
   :where([data-module="part-requests"]) .pr-devices td.pr-device-action { display: block; }
   :where([data-module="part-requests"]) .pr-devices td.pr-device-action button.ui-button { width: 100%; }

@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import { createHarness, dashboard, discordA, discordB, goodDraft, testCredentials, type Harness } from "./helpers/harness.ts";
 import { dataSource, dataSourceId, databaseId, guestPerson, memberPerson, namelessGuest, notionResponse, otherDataSourceId, stubNotion, testToken, type Stub } from "./helpers/notion-stub.ts";
-import { groupDevices } from "../src/dashboard/part-requests-model.ts";
+import { memberRows } from "../src/dashboard/part-requests-model.ts";
 import { maximumCreates, maximumGeneral, minimumExtensionVersion, pendingLimitMs, repeatWindowMs } from "../src/requests.ts";
 import { clientAddress, deviceLimitMessage, exchangePin, issuePin, maximumDevicesPerMember, maximumWrongPins, maximumWrongPinsPerAddress, pairingPauseMs, workerSubrequestAddress } from "../src/pairing.ts";
 
@@ -268,13 +268,13 @@ test("self-revoke: the Admin devices tab shows it as revoked like any other, and
   await revoke(key);
   const { body } = await h.call("GET", "/admin/part-requests/devices");
   assert.equal(body.devices.length, 2);
-  const [group] = groupDevices(body.devices, body.limitPerMember);
-  assert.equal(group!.badge.label, "1 of 5 devices");
-  assert.equal(group!.devices.at(-1)!.label, "Browser extension", "revoked devices sort last");
-  assert.ok(group!.devices.at(-1)!.revokedMs! >= started);
-  assert.equal(group!.devices[0]!.revokedMs, null);
+  const [member] = memberRows(body, Date.now());
+  assert.equal(member!.working.length, 1);
+  assert.equal(member!.devices.at(-1)!.label, "Browser extension", "revoked devices sort last");
+  assert.ok(member!.devices.at(-1)!.revokedMs! >= started);
+  assert.equal(member!.devices[0]!.revokedMs, null);
   assert.equal((await h.admin("GET", "/status")).body.pairedDevices, 1);
-  const deviceId = group!.devices.at(-1)!.id;
+  const deviceId = member!.devices.at(-1)!.id;
   assert.equal((await h.call("POST", "/admin/part-requests/devices/revoke", { origin: dashboard, body: { deviceId } })).status, 404, "an Admin page opened earlier gets the existing answer");
   assert.equal((await h.call("GET", "/public/part-requests/options", { key: other })).status, 200);
 });
@@ -931,6 +931,32 @@ test("Admin data: the log pages newest first; devices show labels and no key mat
   assert.ok(!/key_hash|keyHash/.test(devices.text));
   assert.ok(!h.test.rows<{ key_hash: string }>("SELECT key_hash FROM part_requests_devices").some((row) => devices.text.includes(row.key_hash)));
   assert.ok(h.test.rows<{ action: string }>("SELECT action FROM audit_log").some((row) => row.action === "part_requests.connection_verified"));
+});
+
+test("devices: the active roster comes back with only an ID and a name, so a member with no device can be listed", async () => {
+  await h.connect();
+  await h.pair();
+  const { status, body, text } = await h.call("GET", "/admin/part-requests/devices");
+  assert.equal(status, 200);
+  assert.deepEqual(body.roster, [{ id: "m-a", name: "Test Student A" }, { id: "m-b", name: "Test Student B" }]);
+  assert.equal(body.rosterLimited, false);
+  for (const secret of ["student.a@example.test", "student.b@example.test", "9001", "9002", "externalId", "email"]) assert.ok(!text.includes(secret), secret);
+  assert.deepEqual(memberRows(body, Date.now()).map((member) => member.devices.length), [1, 0]);
+  h.test.run("UPDATE members SET active=0 WHERE id='m-b'");
+  assert.deepEqual((await h.call("GET", "/admin/part-requests/devices")).body.roster, [{ id: "m-a", name: "Test Student A" }], "only active members");
+});
+
+test("devices: exactly 500 on the roster raises the flag, because Core's projection stops there", async () => {
+  const add = (from: number, to: number) => { for (let index = from; index < to; index++) h.test.run("INSERT INTO members(id,installation_id,external_id,first_name,last_name) VALUES (?,'primary',?,'Test','Bulk')", `bulk-${index}`, `ext-${index}`); };
+  add(0, 497);
+  const under = await h.call("GET", "/admin/part-requests/devices");
+  assert.equal(under.body.roster.length, 499);
+  assert.equal(under.body.rosterLimited, false);
+  add(497, 498);
+  const full = await h.call("GET", "/admin/part-requests/devices");
+  assert.equal(full.body.roster.length, 500);
+  assert.equal(full.body.rosterLimited, true);
+  assert.ok(!full.text.includes("ext-"));
 });
 
 test("query counts: the routes stay small enough for Workers Free", async () => {
