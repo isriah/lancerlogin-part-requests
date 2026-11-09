@@ -1,7 +1,7 @@
 // The refresh job: re-reads the database's layout, then workspace members, then people named on existing requests, then any
 // missing names. It makes one Notion call per scheduler slice and keeps its place in the database, which is what Workers
 // Free's 10 ms CPU limit asks of a job. Every module write pokes jobs, so it first checks whether a run is due.
-import { clearRefusal, parseSchema, readConnection, recordRefusal, savedToken, type ConnectionRow, type Credentials } from "./connection.ts";
+import { clearRefusal, insertRefused, parseSchema, readConnection, recordRefusal, savedToken, type ConnectionRow, type Credentials } from "./connection.ts";
 import { AppError, NotionClient, type Person, type Schema } from "./notion.ts";
 import { installationId, type Database } from "./pairing.ts";
 
@@ -136,7 +136,8 @@ export async function refreshRecipients(context: JobContext): Promise<unknown> {
       step = refresh.step;
       const more = await slice(db, refresh, connection, schema, client, now);
       // Only reading the database says the database can be reached. Listing users and looking up one name say nothing about it.
-      if (readsDatabase(step) && current.rejectionCode) { await clearRefusal(db, current); current = { ...current, rejectionCode: null, rejectedMs: null }; }
+      // A missing Insert content capability is not cleared by a read: see clearRefusal.
+      if (readsDatabase(step) && current.rejectionCode && current.rejectionCode !== insertRefused) { await clearRefusal(db, current); current = { ...current, rejectionCode: null, rejectedMs: null }; }
       if (!more) return { done: true };
       const next = await db.prepare("SELECT step,cursor,pages,next_due_ms AS nextDue FROM part_requests_recipient_refresh WHERE installation_id=?").bind(installationId).first<Refresh>();
       if (!next) return { done: true };

@@ -53,23 +53,35 @@ export function connectionProblem(row: ConnectionRow | null): { readonly code: s
   return undefined;
 }
 
+/**
+ * Kept in rejection_code when Notion answered 403 to creating a page: the connection can read the database but lacks the
+ * "Insert content" capability. Only creating a page proves otherwise, so reads leave it alone. See clearRefusal.
+ */
+export const insertRefused = "notion_insert_403";
+
 /** What the Admin page reports when Notion refused the saved token. It does not stop requests: see the migration. */
-const refusedProblem = (row: ConnectionRow | null) => !row?.rejectionCode ? undefined : row.rejectionCode === "notion_401" ? "notion_token_rejected" : "notion_access_lost";
+const refusedProblem = (row: ConnectionRow | null) => !row?.rejectionCode ? undefined
+  : row.rejectionCode === "notion_401" ? "notion_token_rejected" : row.rejectionCode === insertRefused ? "notion_insert_refused" : "notion_access_lost";
 
 /**
- * Remember that Notion refused this token: 401, or 403 or 404 for lost access. Other failures, such as a 500 or a 429, say
- * nothing about the token. `ciphertext` in the WHERE means a slow call made with a replaced token cannot mark the new one.
- * A failure to write this must not change the answer to whoever made the call.
+ * Remember that Notion refused this token: 401, 403 or 404 for lost access, or `insertRefused`. Other failures, such as a 500
+ * or a 429, say nothing about the token. `ciphertext` in the WHERE means a slow call made with a replaced token cannot mark the
+ * new one. A failure to write this must not change the answer to whoever made the call.
  */
 export async function recordRefusal(db: Database, row: ConnectionRow, code: string, now: number): Promise<void> {
-  if (code !== "notion_401" && code !== "notion_403" && code !== "notion_404" || row.rejectionCode === code || !row.ciphertext) return;
+  if (code !== "notion_401" && code !== "notion_403" && code !== "notion_404" && code !== insertRefused || row.rejectionCode === code || !row.ciphertext) return;
   await db.prepare("UPDATE part_requests_notion SET rejection_code=?,rejected_ms=? WHERE installation_id=? AND ciphertext=?").bind(code, now, installationId, row.ciphertext).run().catch(() => undefined);
 }
 
-/** A Notion call with this token worked, so whatever refused it before has passed. No write unless a refusal is recorded. */
-export async function clearRefusal(db: Database, row: ConnectionRow): Promise<void> {
-  if (!row.rejectionCode || !row.ciphertext) return;
-  await db.prepare("UPDATE part_requests_notion SET rejection_code=NULL,rejected_ms=NULL WHERE installation_id=? AND ciphertext=?").bind(installationId, row.ciphertext).run().catch(() => undefined);
+/**
+ * A Notion call with this token worked, so whatever refused it before has passed. No write unless a refusal is recorded.
+ * A read (`created` false) says nothing about inserting, so it never clears `insertRefused`, even one recorded after `row` was
+ * read: the check is in the WHERE. Only a page that was created does.
+ */
+export async function clearRefusal(db: Database, row: ConnectionRow, created = false): Promise<void> {
+  if (!row.rejectionCode || !row.ciphertext || !created && row.rejectionCode === insertRefused) return;
+  await db.prepare(`UPDATE part_requests_notion SET rejection_code=NULL,rejected_ms=NULL WHERE installation_id=? AND ciphertext=?${created ? "" : " AND rejection_code<>?"}`)
+    .bind(installationId, row.ciphertext, ...created ? [] : [insertRefused]).run().catch(() => undefined);
 }
 
 export const stepSql = "EXISTS(SELECT 1 FROM part_requests_settings WHERE installation_id=?) AND EXISTS(SELECT 1 FROM part_requests_notion WHERE installation_id=? AND ciphertext IS NOT NULL AND schema_json IS NOT NULL AND verified_ms IS NOT NULL)";
@@ -124,9 +136,14 @@ const tokenStatements = (db: Database, encrypted: { ciphertext: string; iv: stri
   audit(db, actor, "part_requests.token_saved", now),
 ];
 
+/**
+ * Verifying only reads, so a missing Insert content capability outlasts it with the same token. A new token clears it first,
+ * in tokenStatements, since it may belong to a different connection.
+ */
 const connectionStatements = (db: Database, schema: Schema, actor: string, now: number): Statement[] => [
-  db.prepare("UPDATE part_requests_notion SET database_id=?,data_source_id=?,schema_json=?,verified_ms=?,schema_error=NULL,rejection_code=NULL,rejected_ms=NULL,updated_ms=? WHERE installation_id=?")
-    .bind(schema.databaseId, schema.dataSourceId, JSON.stringify(schema), now, now, installationId),
+  db.prepare(`UPDATE part_requests_notion SET database_id=?1,data_source_id=?2,schema_json=?3,verified_ms=?4,schema_error=NULL,
+    rejection_code=CASE WHEN rejection_code=?7 THEN rejection_code END,rejected_ms=CASE WHEN rejection_code=?7 THEN rejected_ms END,updated_ms=?5 WHERE installation_id=?6`)
+    .bind(schema.databaseId, schema.dataSourceId, JSON.stringify(schema), now, now, installationId, insertRefused),
   // Have the refresh job start from the top on its next run; this write also pokes it.
   db.prepare(`INSERT INTO part_requests_recipient_refresh(installation_id,step,next_due_ms) VALUES (?,'idle',0)
     ON CONFLICT(installation_id) DO UPDATE SET step='idle',cursor=NULL,pages=0,next_due_ms=0`).bind(installationId),

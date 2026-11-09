@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import { createHarness, dashboard, discordA, discordB, goodDraft, testCredentials, type Harness } from "./helpers/harness.ts";
 import { dataSource, dataSourceId, databaseId, guestPerson, memberPerson, namelessGuest, notionResponse, otherDataSourceId, stubNotion, testToken, type Stub } from "./helpers/notion-stub.ts";
-import { memberRows, refreshNotice } from "../src/dashboard/part-requests-model.ts";
+import { connectionProblem, isConnected, memberRows, refreshNotice } from "../src/dashboard/part-requests-model.ts";
 import { maximumCreates, maximumGeneral, minimumExtensionVersion, pendingLimitMs, repeatWindowMs } from "../src/requests.ts";
 import { clientAddress, deviceLimitMessage, exchangePin, issuePin, maximumDevicesPerMember, maximumWrongPins, maximumWrongPinsPerAddress, pairingPauseMs, workerSubrequestAddress } from "../src/pairing.ts";
 
@@ -965,7 +965,7 @@ const notionAnswers = (match: RegExp, code: number) => stub.on(match, () => noti
 const healthyNotion = () => { stub.restore(); stub = stubNotion(); };
 const databaseLinkBody = { databaseUrl: databaseId, dataSourceId };
 
-for (const [code, problem] of [[401, "notion_token_rejected"], [403, "notion_access_lost"], [404, "notion_access_lost"]] as const) {
+for (const [code, problem, stored] of [[401, "notion_token_rejected", "notion_401"], [403, "notion_insert_refused", "notion_insert_403"], [404, "notion_access_lost", "notion_404"]] as const) {
   test(`refused: a ${code} from a request shows ${problem}, keeps the student's answer, and the next call that works clears it`, async () => {
     const key = await ready();
     assert.equal((await statusOf()).problem, null);
@@ -979,7 +979,7 @@ for (const [code, problem] of [[401, "notion_token_rejected"], [403, "notion_acc
     assert.ok(status.rejectedMs >= before);
     assert.equal(status.tokenSaved, true);
     assert.equal(status.verifiedMs !== null, true, "the connection itself stays");
-    assert.equal(h.test.rows<any>("SELECT rejection_code FROM part_requests_notion")[0].rejection_code, `notion_${code}`);
+    assert.equal(h.test.rows<any>("SELECT rejection_code FROM part_requests_notion")[0].rejection_code, stored);
     healthyNotion();
     assert.equal((await send(key, uuid())).status, 201, "requests keep trying, so a glitch can clear itself");
     const after = await statusOf();
@@ -987,6 +987,72 @@ for (const [code, problem] of [[401, "notion_token_rejected"], [403, "notion_acc
     assert.equal(after.rejectedMs, null);
   });
 }
+
+// ---- A connection without Insert content: Notion answers reads but refuses to create a page with a 403.
+const insertRefused = () => notionAnswers(/^POST \/pages$/, 403);
+
+test("insert content: a 403 creating a page reads as the missing capability, and a working Carts read does not flip it back", async () => {
+  const key = await ready();
+  await h.runJob();
+  insertRefused();
+  await send(key, uuid());
+  const refused = await statusOf();
+  assert.equal(isConnected(refused), false);
+  // Carts reads the database, which this connection can still do.
+  stub.calls.length = 0;
+  const carts = await h.call("GET", "/public/part-requests/orders", { key });
+  assert.ok(carts.status === 200 || carts.status === 202, carts.text);
+  assert.ok(stub.calls.some((call) => call.method === "POST" && call.url.includes("/data_sources/")), "Carts read the database");
+  const after = await statusOf();
+  assert.equal(isConnected(after), false, "a successful read says nothing about inserting");
+  assert.equal(refused.problem, "notion_insert_refused");
+  assert.equal(after.problem, "notion_insert_refused");
+  assert.match(connectionProblem(after)!, /Insert content/);
+  assert.equal(after.rejectedMs, refused.rejectedMs);
+});
+
+test("insert content: a refresh run that reads the database does not flip it back either, in either scheduler mode", async () => {
+  const key = await ready();
+  insertRefused();
+  await send(key, uuid());
+  for (const steps of [true, false]) {
+    jobDue();
+    await h.runJob(steps);
+    assert.equal((await statusOf()).problem, "notion_insert_refused", `steps=${steps}`);
+  }
+});
+
+test("insert content: verifying with the saved token keeps it; a request that goes through or a new token clears it", async () => {
+  const key = await ready();
+  insertRefused();
+  await send(key, uuid());
+  assert.equal((await h.admin("POST", "/verify", databaseLinkBody)).body.problem, "notion_insert_refused", "verify only reads, so it cannot prove inserting works");
+  healthyNotion();
+  assert.equal((await send(key, uuid())).status, 201);
+  assert.equal((await statusOf()).problem, null);
+  insertRefused();
+  await send(key, uuid());
+  healthyNotion();
+  assert.equal((await h.admin("POST", "/verify", { ...databaseLinkBody, token: testToken })).body.problem, null, "a new token may be a different connection");
+});
+
+test("insert content: a 401 still reads as a rejected token, and a read refusal still reads as lost access", async () => {
+  const key = await ready();
+  insertRefused();
+  await send(key, uuid());
+  notionAnswers(/^GET \/data_sources\//, 401);
+  jobDue();
+  await h.runJob();
+  assert.equal((await statusOf()).problem, "notion_token_rejected");
+  healthyNotion();
+  insertRefused();
+  await send(key, uuid());
+  assert.equal((await statusOf()).problem, "notion_insert_refused");
+  notionAnswers(/^GET \/data_sources\//, 403);
+  jobDue();
+  await h.runJob();
+  assert.equal((await statusOf()).problem, "notion_access_lost");
+});
 
 for (const code of [500, 429, 400, 409]) {
   test(`refused: a passing ${code} says nothing about the token`, async () => {
@@ -1181,6 +1247,17 @@ test("refused: a slow call made with a replaced token cannot mark the new one", 
   assert.equal((await h.admin("POST", "/verify", { ...databaseLinkBody, token: testToken })).status, 200);
   await recordRefusal(h.db, old, "notion_401", Date.now());
   assert.equal((await statusOf()).problem, null);
+});
+
+test("insert content: a read that started before the refusal was recorded cannot clear it", async () => {
+  const key = await ready();
+  const { readConnection, clearRefusal } = await import("../src/connection.ts");
+  h.test.run("UPDATE part_requests_notion SET rejection_code='notion_404',rejected_ms=1");
+  const stale = (await readConnection(h.db))!;
+  insertRefused();
+  await send(key, uuid());
+  await clearRefusal(h.db, stale);
+  assert.equal((await statusOf()).problem, "notion_insert_refused");
 });
 
 test("refused: the token stays out of every answer, the database and the logs, and setup stays complete", async () => {

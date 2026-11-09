@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  adminSection, adminSections, connectionProblem, databaseLink, formatDate, formatDateTime, formatShortDate, formatTime, deviceSummary, emptyMembersText, inactiveNote, inFilter, memberFilters, memberFlag, memberLastUsed, memberRows, notionPageLink, offRosterNote, searchMatches, visibleMembers, pairingNotice, refreshNotice, requestRow, revokeMessage, uncertainBanner, uncertainNote, type Device, type MemberFilter,
+  adminSection, adminSections, connectionProblem, databaseLink, formatDate, formatDateTime, formatShortDate, formatTime, deviceSummary, emptyMembersText, inactiveNote, inFilter, isConnected, memberFilters, memberFlag, memberLastUsed, memberRows, notionPageLink, offRosterNote, searchMatches, visibleMembers, pairingNotice, refreshNotice, requestRow, revokeMessage, uncertainBanner, uncertainNote, type Device, type MemberFilter,
 } from "../src/dashboard/part-requests-model.ts";
 
 const zone = "America/Los_Angeles";
@@ -130,6 +130,12 @@ test("the Connection tab's problem line names a rejected token and lost access, 
   assert.match(lost, /^Notion refused access to the ordering database on Nov 8, 2:14 PM, so new requests and Carts refreshes will fail until this is fixed\..*add the connection to the database in Notion.*verify the connection again\.$/);
   assert.match(connectionProblem({ tokenSaved: true, problem: "notion_token_rejected", schemaError: null })!, /^Notion rejected the saved token, so/);
   for (const text of [rejected, lost]) assert.doesNotMatch(text, /have stopped/, "a refusal does not block requests, and Carts can serve its copy");
+});
+
+test("the Connection tab names a missing Insert content capability, where to turn it on, and that it needs attention", () => {
+  const status = { tokenSaved: true, problem: "notion_insert_refused", schemaError: null, rejectedMs: at };
+  assert.equal(isConnected(status), false);
+  assert.equal(connectionProblem(status, zone), "Notion refused to add a request to the ordering database on Nov 8, 2:14 PM because the connection lacks the Insert content capability, so new requests will fail until it is turned on. Carts and the recipient list still work, since they only read. To fix it, open this connection in Notion's integration settings and turn on Insert content under its capabilities. This clears once a request goes through.");
 });
 
 test("the Connection tab's pairing and recipient notices", () => {

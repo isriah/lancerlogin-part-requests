@@ -3,7 +3,7 @@
 // Duplicate protection: a submission ID's row is written before Notion is called, and only the request that wrote it calls
 // Notion. Anything else with that ID gets the recorded result. A row still pending after the Notion timeout means the Worker
 // stopped without an answer (the client can disconnect mid-request), so it reads as uncertain and is never sent again.
-import { clearRefusal, connectionProblem, parseSchema, readCartsEnabled, readConnection, recordRefusal, savedToken, type ConnectionRow, type Credentials } from "./connection.ts";
+import { clearRefusal, connectionProblem, insertRefused, parseSchema, readCartsEnabled, readConnection, recordRefusal, savedToken, type ConnectionRow, type Credentials } from "./connection.ts";
 import { json, object, refuse } from "./http.ts";
 import { AppError, databaseLink, NotionClient, pagePayload, parseDraft, statusIncomplete, statusNormal, validateDraft, type RequestDraft } from "./notion.ts";
 import { deviceKeyHash, deviceRefusedMessage, installationId, readDevice, sha256Hex, type AuthenticatedDevice, type Database } from "./pairing.ts";
@@ -235,7 +235,7 @@ export async function createRequest({ db, authorization, credentials, now }: Dev
   try {
     const pageUrl = await new NotionClient(token).create(payload);
     await finish("created", pageUrl, null, null);
-    await clearRefusal(db, connection as ConnectionRow);
+    await clearRefusal(db, connection as ConnectionRow, true);
     return json({ submissionId: id, state: "created", pageUrl, repeats }, 201);
   } catch (error) {
     if (!(error instanceof AppError)) {
@@ -247,7 +247,8 @@ export async function createRequest({ db, authorization, credentials, now }: Dev
       return json({ submissionId: id, state: "uncertain", error: uncertainMessage, code: "notion_uncertain" }, 202);
     }
     await finish("failed", null, error.code, error.message);
-    await recordRefusal(db, connection as ConnectionRow, error.code, now);
+    // A 403 here, from a connection that passed verification by reading the database, is a missing Insert content capability.
+    await recordRefusal(db, connection as ConnectionRow, error.code === "notion_403" ? insertRefused : error.code, now);
     const retryAfter = object(error.details).retryAfterSeconds;
     return json({ submissionId: id, state: "failed", error: error.message, code: error.code, ...(typeof retryAfter === "number" ? { retryAfterSeconds: retryAfter } : {}) }, 502);
   }
