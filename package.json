@@ -1,6 +1,6 @@
 {
   "name": "lancerlogin-module-part-requests",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "description": "Part Requests for LancerLogin Modular: students pair a browser extension through Discord and send part requests through the plugin.",

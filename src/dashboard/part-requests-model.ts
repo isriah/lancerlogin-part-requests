@@ -190,3 +190,37 @@ export function refreshNotice(refresh: SetupStatus["refresh"], timeZone?: string
   if (refresh.lastError === "notion_users_403") return "Workspace members could not be listed, so only people named on existing requests are being added. Check that the connection has the Read user information capability.";
   return `The last refresh could not finish. It tries again within an hour.${refresh.finishedMs ? ` The list from ${formatDateTime(refresh.finishedMs, timeZone)} is still in use.` : ""}`;
 }
+
+// ---- Generate pairing PIN
+/** What POST /admin/part-requests/pins returns. The only place the PIN appears. */
+export type IssuedPin = { readonly memberId: string; readonly memberName: string; readonly pin: string; readonly expiresMs: number; readonly siteAddress: string; readonly pairedDevices: number };
+
+/** As the Worker sets it. The page hides the PIN this long after asking for it, which is never later than the Worker's expiry. */
+export const pinLifetimeMinutes = 10;
+export const pinLifetimeMs = pinLifetimeMinutes * 60_000;
+
+export const pinIntro = "For a member who cannot use /ordering-pin, for example one without Discord. The PIN works once, for 10 minutes, and any earlier unused PIN for that member stops working.";
+export const pinInstructions = "Open the Robotics Part Requests extension, enter the site address and this PIN.";
+export const pinShownOnceNote = "This PIN is shown only once. It disappears when it expires or when you close this window.";
+export const pinExpiredText = "That PIN has expired and was removed from the screen. Generate another if it is still needed.";
+export const pinSearchLabel = "Find a member";
+export const pinNoMatches = (search: string) => search.trim() ? `No members on the active roster match "${search.trim()}".` : "No members are on the active roster.";
+export const pinMemberAtLimit = (limit: number) => `Has ${limit} devices. Remove one first.`;
+export const pinMoreMatches = (shown: number, total: number) => `Showing ${shown} of ${total}. Type more of a name to narrow the list.`;
+export const pinResultTitle = (memberName: string) => `PIN for ${memberName}`;
+export const pinExpiryText = (expiresMs: number, timeZone?: string) => `Expires at ${formatTime(expiresMs, timeZone)} (${pinLifetimeMinutes} minutes)`;
+export const pinPairedNote = (paired: number, limit: number) => paired ? `They have ${paired} of ${limit} devices paired, and those stay paired.` : "";
+/** What Copy puts on the clipboard: everything a member needs, to paste into a message. */
+export const pinShareText = (pin: Pick<IssuedPin, "pin" | "siteAddress">) => `Site address: ${pin.siteAddress}\nPIN: ${pin.pin}\n${pinInstructions} The PIN works once and expires in ${pinLifetimeMinutes} minutes.`;
+export const pinCopied = "Copied the site address and PIN.";
+export const pinCopyFailed = "Copy did not work. Select the PIN and site address and copy them yourself.";
+
+/** How many members the picker lists at once. A search narrows the rest. */
+export const pinPickerSize = 8;
+
+/** Members the picker offers: the active roster by name, matching the search on name only, with whether each is at the limit. */
+export function pinCandidates(rows: readonly MemberRow[], search: string, limit: number) {
+  const text = search.trim().toLowerCase();
+  const found = rows.filter((row) => row.active && (!text || includes(row.name, text)));
+  return { total: found.length, shown: found.slice(0, pinPickerSize).map((row) => ({ id: row.id, name: row.name, atLimit: row.working.length >= limit })) };
+}
