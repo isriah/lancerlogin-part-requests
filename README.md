@@ -6,6 +6,7 @@ Students click a browser extension on a vendor's product page, review the detail
 
 | Plugin | LancerLogin Core | Module SDK | Module contract |
 | --- | --- | --- | --- |
+| 1.0.x | `>=2.1.0-beta.7 <3.0.0` | `^1.6.0` | 1 |
 | 0.1.x | `>=2.1.0-beta.7 <3.0.0` | `^1.6.0` | 1 |
 
 ## Admin pages
