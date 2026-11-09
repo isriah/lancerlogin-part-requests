@@ -2,10 +2,11 @@
 
 Students click a browser extension on a vendor's product page, review the details and create a request in the team's Notion ordering database. LancerLogin holds the Notion token. Students never sign in to LancerLogin.
 
-**Status: v1.0.0, stable.** The backend and the Admin pages are built: pairing, the Notion connection, the device API, the request log, the recipient job, Core's setup screen and **Settings > Modules > Part Requests**. Carts here means reading open orders and recording who built a cart. Filling store carts belongs to the extension.
+**Status: v1.1.0, stable.** The backend and the Admin pages are built: pairing, the Notion connection, the device API, the request log, the recipient job, Core's setup screen and **Settings > Modules > Part Requests**. Carts here means reading open orders and recording who built a cart. Filling store carts belongs to the extension.
 
 | Plugin | LancerLogin Core | Module SDK | Module contract |
 | --- | --- | --- | --- |
+| 1.1.x | `>=2.1.0-beta.7 <3.0.0` | `^1.6.0` | 1 |
 | 1.0.x | `>=2.1.0-beta.7 <3.0.0` | `^1.6.0` | 1 |
 | 0.1.x | `>=2.1.0-beta.7 <3.0.0` | `^1.6.0` | 1 |
 
@@ -15,7 +16,7 @@ Students click a browser extension on a vendor's product page, review the detail
 
 - **Connection:** any problem and its fix at the top, then the Notion connection and its token, with Replace and Remove, the data source, last verified time, site address and Open setup, which reopens Core's setup screen; the repair fields whenever requests have stopped, as Core does not reopen setup by itself after a token is removed; the recipient list with Refresh now; pairing, with a notice while it is paused; and the Carts switch. One Verify button saves the token and checks the database together. Old `?section=setup` and `?section=status` links open this section.
 - **Requests log:** every request with its member and device, newest first, with a banner when any result is uncertain.
-- **Paired devices:** counts, search by name or device, and filters for No devices, At the limit, Inactive 30+ days and Off roster, then one compact row per member by name, including members with no devices. A row opens to that member's devices, with Revoke. Inactive is a prompt to look, not a reason to revoke: last used only changes when a device sends a request or marks a cart item.
+- **Paired devices:** counts, search by name or device, and filters for No devices, At the limit, Inactive 30+ days and Off roster, then one compact row per member by name, including members with no devices. A row opens to that member's devices, with Revoke. **Generate pairing PIN** makes a PIN for a chosen member, for example one without Discord: the same PIN `/ordering-pin` makes, shown once with its expiry, the site address and a Copy button, and removed from the screen when it expires or the dialog closes. Inactive is a prompt to look, not a reason to revoke: last used only changes when a device sends a request or marks a cart item.
 
 Core shows its own setup screen by itself until setup is complete, and an Admin can reopen it from Connection. When Notion answers 401, 403 or 404 to a request or an orders read, or the refresh job gets a 403 or 404 reading the database or a 401 from any call, the code and time are recorded and Connection shows the rejected token or lost access at the top instead of Connected. A 500 or a 429 records nothing. It clears on a successful verify, a new or removed token, or the next call that reaches the database, so a brief glitch doesn't stick. Listing users is not such a call. It doesn't stop requests or change what students are told: each call still tries Notion and reports its own result, and Carts can serve its copy for a while.
 
@@ -178,6 +179,7 @@ Under `/admin/part-requests`, Admin only. Core requires a capability marked for 
 | `GET /devices` | `{ devices, limitPerMember, roster, rosterLimited }`. `devices`: label, member, created, last used and revoked, with no key material. `roster`: the active roster, each person's `id` and `name` only, never their email or external ID. Core's projection stops at 500 members, so `rosterLimited` is true at exactly 500 and the page says the No devices list may be incomplete. |
 | `POST /devices/revoke` | `{ deviceId }` ends that device's access at once. |
 | `POST /recipients/refresh` | Runs the recipient refresh now. |
+| `POST /pins` | `{ memberId }`. `201 { pin, expiresMs, siteAddress, memberId, memberName, pairedDevices }`: a pairing PIN for that member, who needs no Discord account. It is made by the same function as `/ordering-pin`, so it is the same 8-character PIN, works once, expires in 10 minutes, counts against the device limit, is stored only as its SHA-256, and cancels the member's earlier unused PIN from either path. The response is the only place the PIN appears. Each PIN writes one audit row, `part_requests.pin_issued`, with the Admin's user ID, the member ID as the target and the time, never the PIN. Refusals: `400 validation`, `404 unknown_member`, `409 not_active` (off the active roster), `409 device_limit` (remove a device first), `409 not_set_up` (no site address saved yet), `409 devices_changed`, and `429 rate_limited` with `Retry-After` after 30 PINs from one Admin in 10 minutes. |
 
 ## Recipient refresh
 

@@ -86,6 +86,22 @@
 :where([data-module="part-requests"]) .pr-notice-action { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); }
 :where([data-module="part-requests"]) .pr-notice-action > span { flex: 1 1 18rem; min-width: 0; }
 
+/* Generate pairing PIN. The PIN block is Core's .pairing-code, as on Add kiosk. */
+:where([data-module="part-requests"]) .pr-pin-dialog { max-height: calc(100dvh - 2 * var(--space-4)); overflow-y: auto; }
+:where([data-module="part-requests"]) .pr-pin-member { margin: 0; font-size: var(--text-card-heading); }
+:where([data-module="part-requests"]) .pairing-code.pr-pin-code { margin: 0; border: 1px solid var(--ui-border); }
+:where([data-module="part-requests"]) .pr-pin-value { overflow-wrap: anywhere; text-align: center; user-select: all; }
+:where([data-module="part-requests"]) .pr-pin-site { user-select: all; }
+:where([data-module="part-requests"]) .pr-pin-picker { gap: var(--space-2); }
+:where([data-module="part-requests"]) .pr-pin-picker .pr-member-list { max-height: 22rem; overflow-y: auto; }
+:where([data-module="part-requests"]) .pr-pin-option { display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: var(--space-1) var(--space-3); min-height: var(--control-min-block-size); padding: var(--space-1) var(--space-3); font-weight: 400; cursor: pointer; }
+:where([data-module="part-requests"]) .pr-pin-option:hover { background: var(--ui-surface-subtle); }
+:where([data-module="part-requests"]) .pr-pin-option:has(input:checked) { background: color-mix(in srgb,var(--primary) 22%,var(--ui-surface)); }
+:where([data-module="part-requests"]) .pr-pin-option:has(input:focus-visible) { outline: 3px solid var(--ui-focus); outline-offset: -3px; }
+:where([data-module="part-requests"]) .pr-pin-option[data-disabled="true"] { cursor: default; color: var(--ui-text-muted); }
+:where([data-module="part-requests"]) .pr-pin-limit { display: grid; justify-items: end; gap: var(--space-1); text-align: right; }
+:where([data-module="part-requests"]) .pr-pin-limit .pr-row-note { margin: 0; }
+
 @media (max-width: 800px) {
   :where([data-module="part-requests"]) .pr-summary { grid-template-columns: minmax(0,1fr); gap: var(--space-2); }
   :where([data-module="part-requests"]) .pr-summary > div { grid-template-columns: minmax(0,1fr) auto; grid-template-areas: "label value" "note value"; align-items: center; column-gap: var(--space-3); padding: var(--space-2) var(--space-3); }
@@ -115,6 +131,9 @@
   :where([data-module="part-requests"]) .pr-facts > div { grid-template-columns: minmax(6.5rem,.6fr) minmax(0,1fr); }
   :where([data-module="part-requests"]) .pr-dialog .dialog-actions { display: grid; grid-template-columns: minmax(0,1fr); }
   :where([data-module="part-requests"]) .pr-dialog .dialog-actions button.ui-button { width: 100%; }
+  :where([data-module="part-requests"]) .dialog-backdrop > .pr-dialog.pr-pin-dialog[role="dialog"] { padding: var(--space-4); }
+  :where([data-module="part-requests"]) .pr-pin-option { grid-template-columns: auto minmax(0,1fr); }
+  :where([data-module="part-requests"]) .pr-pin-limit { grid-column: 2; justify-items: start; text-align: left; }
   :where([data-module="part-requests"]) .saved-credentials-actions { width: 100%; }
   :where([data-module="part-requests"]) .saved-credentials-actions .ui-button { flex: 1 1 auto; }
 }

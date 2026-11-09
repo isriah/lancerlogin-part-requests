@@ -69,6 +69,41 @@ export function bearerDeviceKey(header: string | null): string | undefined {
 
 const openDeviceCount = "(SELECT COUNT(*) FROM part_requests_devices d WHERE d.installation_id=? AND d.member_id=? AND d.revoked_ms IS NULL)";
 
+/** A new PIN for one member, or why there is none. `pin` is the formatted PIN; only its hash is stored. */
+export type IssuedPin =
+  | { readonly issued: true; readonly memberId: string; readonly memberName: string; readonly pin: string; readonly expiresMs: number; readonly siteAddress: string; readonly pairedDevices: number }
+  | { readonly issued: false; readonly reason: "unknown_member" | "not_active" | "not_set_up" | "device_limit" | "devices_changed" };
+
+/**
+ * Make a PIN for a roster member: the one path behind /ordering-pin and the Admin page. The member must be on the active
+ * roster and under the device limit, and setup must have saved the site address. Any earlier unused PIN of that member is
+ * cancelled in the same batch, so each member has at most one live PIN whoever asked for it. `after` joins that batch after
+ * the insert, so `changes()` in it is 1 only when the PIN was stored: an audit row uses that to follow the PIN exactly.
+ */
+export async function issuePinForMember(db: Database, memberId: string, now: number, options: { readonly random?: Random; readonly after?: readonly Statement[] } = {}): Promise<IssuedPin> {
+  const [member, settings, devices] = await Promise.all([
+    db.prepare("SELECT id,active,first_name AS firstName,last_name AS lastName FROM members WHERE installation_id=? AND id=?").bind(installationId, memberId).first<{ id: string; active: number; firstName: string; lastName: string }>(),
+    db.prepare("SELECT site_address AS siteAddress FROM part_requests_settings WHERE installation_id=?").bind(installationId).first<{ siteAddress: string }>(),
+    db.prepare(`SELECT ${openDeviceCount} AS count`).bind(installationId, memberId).first<{ count: number }>(),
+  ]);
+  if (!member) return { issued: false, reason: "unknown_member" };
+  if (member.active !== 1) return { issued: false, reason: "not_active" };
+  if (!settings) return { issued: false, reason: "not_set_up" };
+  const paired = Number(devices?.count ?? 0);
+  if (paired >= maximumDevicesPerMember) return { issued: false, reason: "device_limit" };
+  const pin = generatePin(options.random ?? systemRandom);
+  const results = await db.batch([
+    db.prepare("DELETE FROM part_requests_pairing_pins WHERE installation_id=? AND member_id=? AND expires_ms<?").bind(installationId, member.id, now - 86_400_000),
+    db.prepare("UPDATE part_requests_pairing_pins SET cancelled_ms=? WHERE installation_id=? AND member_id=? AND used_ms IS NULL AND cancelled_ms IS NULL").bind(now, installationId, member.id),
+    db.prepare(`INSERT INTO part_requests_pairing_pins(installation_id,pin_hash,member_id,created_ms,expires_ms)
+      SELECT ?,?,?,?,? WHERE EXISTS(SELECT 1 FROM members WHERE installation_id=? AND id=? AND active=1) AND ${openDeviceCount}<?`)
+      .bind(installationId, await sha256Hex(pin), member.id, now, now + pinLifetimeMs, installationId, member.id, installationId, member.id, maximumDevicesPerMember),
+    ...options.after ?? [],
+  ]);
+  if (results[2]?.meta?.changes !== 1) return { issued: false, reason: "devices_changed" };
+  return { issued: true, memberId: member.id, memberName: `${member.firstName} ${member.lastName}`.trim(), pin: formatPin(pin), expiresMs: now + pinLifetimeMs, siteAddress: settings.siteAddress, pairedDevices: paired };
+}
+
 /** The private reply to /ordering-pin. Never throws for a person's situation: the reply says what to do. */
 export async function issuePin(db: Database, discordUserId: unknown, now: number, random: Random = systemRandom): Promise<string> {
   if (typeof discordUserId !== "string" || !/^\d{10,24}$/.test(discordUserId)) return notLinkedMessage;
@@ -77,27 +112,20 @@ export async function issuePin(db: Database, discordUserId: unknown, now: number
   if (linked.length !== 1) return "Your Discord account is linked to more than one roster member. Ask an Operator to fix your roster link.";
   const member = linked[0]!;
   if (member.active !== 1) return notActiveMessage;
-  const [settings, devices] = await Promise.all([
-    db.prepare("SELECT site_address AS siteAddress FROM part_requests_settings WHERE installation_id=?").bind(installationId).first<{ siteAddress: string }>(),
-    db.prepare(`SELECT ${openDeviceCount} AS count`).bind(installationId, member.id).first<{ count: number }>(),
-  ]);
-  if (!settings) return "Part Requests is not set up yet. Ask an Admin to finish its setup.";
-  const paired = Number(devices?.count ?? 0);
-  if (paired >= maximumDevicesPerMember) return deviceLimitMessage;
-  const pin = generatePin(random);
-  const results = await db.batch([
-    db.prepare("DELETE FROM part_requests_pairing_pins WHERE installation_id=? AND member_id=? AND expires_ms<?").bind(installationId, member.id, now - 86_400_000),
-    db.prepare("UPDATE part_requests_pairing_pins SET cancelled_ms=? WHERE installation_id=? AND member_id=? AND used_ms IS NULL AND cancelled_ms IS NULL").bind(now, installationId, member.id),
-    db.prepare(`INSERT INTO part_requests_pairing_pins(installation_id,pin_hash,member_id,created_ms,expires_ms)
-      SELECT ?,?,?,?,? WHERE EXISTS(SELECT 1 FROM members WHERE installation_id=? AND id=? AND active=1) AND ${openDeviceCount}<?`)
-      .bind(installationId, await sha256Hex(pin), member.id, now, now + pinLifetimeMs, installationId, member.id, installationId, member.id, maximumDevicesPerMember),
-  ]);
-  if (results[2]?.meta?.changes !== 1) return "Your paired devices changed while this PIN was being made. Run /ordering-pin again.";
+  const result = await issuePinForMember(db, member.id, now, { random });
+  if (!result.issued) {
+    // The member was just read as active, so a different answer here means the roster changed in between.
+    if (result.reason === "unknown_member") return notLinkedMessage;
+    if (result.reason === "not_active") return notActiveMessage;
+    if (result.reason === "not_set_up") return "Part Requests is not set up yet. Ask an Admin to finish its setup.";
+    if (result.reason === "device_limit") return deviceLimitMessage;
+    return "Your paired devices changed while this PIN was being made. Run /ordering-pin again.";
+  }
   return [
-    `Your Part Requests PIN is **${formatPin(pin)}**. It works once and expires in 10 minutes.`,
-    `Site address: ${settings.siteAddress}`,
+    `Your Part Requests PIN is **${result.pin}**. It works once and expires in 10 minutes.`,
+    `Site address: ${result.siteAddress}`,
     "Enter both in the browser extension. Any earlier unused PIN no longer works.",
-    paired ? `You have ${paired} of ${maximumDevicesPerMember} devices paired, and they stay paired.` : "",
+    result.pairedDevices ? `You have ${result.pairedDevices} of ${maximumDevicesPerMember} devices paired, and they stay paired.` : "",
   ].filter(Boolean).join("\n");
 }
 

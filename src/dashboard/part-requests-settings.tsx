@@ -7,6 +7,7 @@ import {
   adminSection, adminSections, deviceSummary, emptyMembersText, formatDate, formatDateTime, formatShortDate, inactiveDays, inactiveNote, inFilter, isConnected, memberFilters, memberFlag, memberLastUsed, memberRows, offRosterNote, pairingNotice, refreshNotice, requestRow, revokeMessage, rosterLimitedNote, searchMatches, uncertainBanner, visibleMembers,
   type AdminSection, type Device, type MemberFilter, type MemberRow, type DeviceList, type LoggedRequest, type RequestLogPage, type SetupStatus,
 } from "./part-requests-model.ts";
+import { GeneratePinDialog } from "./part-requests-pin";
 import { ConfirmDialog, Field, fieldAria, LoadState, Notice, Pill } from "./part-requests-ui";
 
 export function PartRequestsSettings({ openSetup }: { openSetup: () => void }) {
@@ -125,6 +126,7 @@ function PairedDevices() {
   const [filter, setFilter] = useState<MemberFilter>("all");
   const [search, setSearch] = useState("");
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
+  const [pinOpen, setPinOpen] = useState(false);
   const searchField = useRef<HTMLInputElement>(null);
   async function load() {
     setError(""); setLoading(true);
@@ -152,10 +154,10 @@ function PairedDevices() {
   return <>
     {revoked
       ? <Notice notice={{ tone: "success", content: revoked.text }} focusKey={revoked.key} />
-      : <p className="ui-status settings-notice pr-notice" role="status">Members pair a device by running <code>/ordering-pin</code> in Discord, which privately replies with the site address and a PIN to enter in the extension. Each member can have up to {limit} devices.</p>}
+      : <p className="ui-status settings-notice pr-notice" role="status">Members pair a device by running <code>/ordering-pin</code> in Discord, which privately replies with the site address and a PIN to enter in the extension. An Admin can also generate a PIN here for a member, for example one without Discord. Each member can have up to {limit} devices.</p>}
     <LoadState loading={loading && !list} error={error} label="paired devices" onRetry={() => void load()} />
     {list && <section className="ui-card pr-stack" aria-labelledby="pr-devices-title">
-      <div className="pr-card-heading"><h2 id="pr-devices-title">Paired devices</h2></div>
+      <div className="pr-card-heading"><h2 id="pr-devices-title">Paired devices</h2><button className="ui-button ui-button--primary" type="button" onClick={() => setPinOpen(true)}>Generate pairing PIN</button></div>
       <dl className="pr-summary">
         <div><dt>Members paired</dt><dd className="pr-summary-value">{summary.paired}</dd><dd className="pr-summary-note">of {summary.onRoster} on the active roster</dd></div>
         <div><dt>Devices</dt><dd className="pr-summary-value">{summary.devices}</dd><dd className="pr-summary-note">{summary.offRosterDevices} {summary.offRosterDevices === 1 ? "is" : "are"} off roster and {summary.offRosterDevices === 1 ? "has" : "have"} no access</dd></div>
@@ -174,6 +176,7 @@ function PairedDevices() {
           {(filter !== "all" || search.trim() !== "") && <button className="ui-button" type="button" onClick={() => { setFilter("all"); setSearch(""); searchField.current?.focus(); }}>Clear filters</button>}
         </div>}
     </section>}
+    {pinOpen && <GeneratePinDialog rows={rows} limit={limit} onClose={() => setPinOpen(false)} />}
     {target && <ConfirmDialog title={`Revoke ${target.label}?`} message={revokeMessage(target)} keepLabel="Keep device" confirmLabel="Revoke device" busy={busy} error={revokeError} onConfirm={() => void revoke()} onClose={() => setTarget(undefined)} />}
   </>;
 }

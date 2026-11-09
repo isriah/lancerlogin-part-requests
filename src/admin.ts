@@ -1,11 +1,11 @@
-// Data for the Admin pages: the request log and paired devices, with revoke and a manual refresh.
+// Data for the Admin pages: the request log and paired devices, with revoke, pairing PINs and a manual refresh.
 // Core lets assigned Operators reach /admin/part-requests, because it requires a capability marked for Operators. Every
 // handler here still requires an Admin, so that capability grants nothing.
 import { listActiveRosterIdentities, type D1Database } from "@lancerlogin/module-sdk/api";
 import { requireAdmin, type AdminRouteContext } from "./connection.ts";
 import { json, object, refuse } from "./http.ts";
-import { installationId, maximumDevicesPerMember, type Database } from "./pairing.ts";
-import { pendingLimitMs } from "./requests.ts";
+import { installationId, issuePinForMember, maximumDevicesPerMember, type Database } from "./pairing.ts";
+import { countStatement, limitWindowMs, pendingLimitMs, type Count } from "./requests.ts";
 
 const pageSize = (value: string | null) => Math.min(100, Math.max(1, Number.parseInt(value ?? "", 10) || 50));
 
@@ -60,6 +60,42 @@ async function revoke(context: AdminRouteContext, db: Database, actor: string, n
   return json({ revoked: deviceId });
 }
 
+/** PINs one Admin may generate per rate-limit window. Well above pairing a team one by one, and a stop for a stuck script. */
+export const maximumAdminPins = 30;
+
+/** Why the Admin page got no PIN, in words an Admin can act on. Never the PIN or anything about one. */
+export const adminPinRefusals = {
+  validation: [400, "Choose a member."],
+  unknown_member: [404, "That member is not on the roster. Choose someone else."],
+  not_active: [409, "That member is not on the active roster, so they cannot pair a device."],
+  not_set_up: [409, "Part Requests is not set up yet. Finish the Notion connection first."],
+  device_limit: [409, `That member already has ${maximumDevicesPerMember} paired devices, the most allowed. Remove one of their devices first, then generate a PIN.`],
+  devices_changed: [409, "That member's paired devices changed while the PIN was being made. Try again."],
+  rate_limited: [429, "Too many PINs were generated in the last few minutes. Wait a few minutes and try again."],
+} as const satisfies Record<string, readonly [number, string]>;
+
+const pinRefusal = (code: keyof typeof adminPinRefusals, retryAfterSeconds?: number) => refuse(adminPinRefusals[code][0], code, adminPinRefusals[code][1], {}, retryAfterSeconds);
+
+/**
+ * POST /pins: { memberId }. A pairing PIN for a member, for someone without Discord. It is the same PIN /ordering-pin makes,
+ * through the same function: one use, 10 minutes, the device limit, only its hash stored, and any earlier unused PIN of that
+ * member cancelled. The response is the only place the PIN appears. The audit row names the Admin and the member, never the PIN.
+ */
+async function issueAdminPin(context: AdminRouteContext, db: Database, actor: string, now: number) {
+  const { memberId } = object(await context.json(1024));
+  if (typeof memberId !== "string" || !memberId || memberId.length > 64) return pinRefusal("validation");
+  // Counted per Admin in the devices' counter table, under a key no device ID can take.
+  const count = await countStatement(db, `admin-pins:${actor}`, "general", now).first<Count>();
+  if (count && Number(count.requests) > maximumAdminPins) return pinRefusal("rate_limited", Math.max(1, Math.ceil((Number(count.windowStart) + limitWindowMs - now) / 1000)));
+  const result = await issuePinForMember(db, memberId, now, {
+    after: [db.prepare("INSERT INTO audit_log(id,installation_id,actor_user_id,action,target_type,target_id,created_at) SELECT ?,?,?,?,?,?,? WHERE changes()=1")
+      .bind(crypto.randomUUID(), installationId, actor, "part_requests.pin_issued", "member", memberId, new Date(now).toISOString())],
+  });
+  if (!result.issued) return pinRefusal(result.reason);
+  const { issued: _, ...pin } = result;
+  return json(pin, 201);
+}
+
 /** POST /recipients/refresh: run the refresh job now. This write also pokes it. */
 async function refresh(db: Database) {
   await db.prepare(`INSERT INTO part_requests_recipient_refresh(installation_id,step,next_due_ms) VALUES (?,'idle',0)
@@ -71,11 +107,12 @@ async function refresh(db: Database) {
 export async function adminRoute(context: AdminRouteContext): Promise<Response | undefined> {
   const path = context.url.pathname.slice("/admin/part-requests".length);
   const method = context.request.method;
-  const known = (path === "/requests" || path === "/devices") && method === "GET" || (path === "/devices/revoke" || path === "/recipients/refresh") && method === "POST";
+  const known = (path === "/requests" || path === "/devices") && method === "GET" || (path === "/devices/revoke" || path === "/recipients/refresh" || path === "/pins") && method === "POST";
   if (!known) return undefined;
   const { userId } = await requireAdmin(context);
   const db = context.db as Database; const now = Date.now();
   if (path === "/requests") return requestLog(context, db, now);
   if (path === "/devices") return devices(db);
+  if (path === "/pins") return issueAdminPin(context, db, userId, now);
   return path === "/devices/revoke" ? revoke(context, db, userId, now) : refresh(db);
 }

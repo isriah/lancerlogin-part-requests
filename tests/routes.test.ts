@@ -98,7 +98,7 @@ test("Admin only: Operators, signed-out visitors and other origins are refused o
   stub.calls.length = 0;
   const routes = [
     ["GET", "/module-setup/part-requests/status"], ["PUT", "/module-setup/part-requests/token"], ["DELETE", "/module-setup/part-requests/token"], ["POST", "/module-setup/part-requests/database"], ["POST", "/module-setup/part-requests/connection"],
-    ["GET", "/admin/part-requests/requests"], ["GET", "/admin/part-requests/devices"], ["POST", "/admin/part-requests/devices/revoke"], ["POST", "/admin/part-requests/recipients/refresh"],
+    ["GET", "/admin/part-requests/requests"], ["GET", "/admin/part-requests/devices"], ["POST", "/admin/part-requests/devices/revoke"], ["POST", "/admin/part-requests/recipients/refresh"], ["POST", "/admin/part-requests/pins"],
   ] as const;
   for (const [method, path] of routes) {
     assert.equal((await h.call(method, path, { role: "operator", origin: dashboard, body: {} })).status, 403, `${method} ${path} as an Operator`);

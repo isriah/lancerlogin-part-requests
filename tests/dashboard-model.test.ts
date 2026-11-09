@@ -147,3 +147,40 @@ test("the Connection tab's pairing and recipient notices", () => {
   assert.doesNotMatch(refreshNotice({ step: "idle", finishedMs: null, lastError: "notion_500" }, zone)!, /still in use/);
   assert.equal(refreshNotice({ step: "idle", finishedMs: at, lastError: "notion_users_403" }, zone), "Workspace members could not be listed, so only people named on existing requests are being added. Check that the connection has the Read user information capability.");
 });
+
+test("Generate pairing PIN: the words on the dialog", async () => {
+  const model = await import("../src/dashboard/part-requests-model.ts");
+  assert.equal(model.pinIntro, "For a member who cannot use /ordering-pin, for example one without Discord. The PIN works once, for 10 minutes, and any earlier unused PIN for that member stops working.");
+  assert.equal(model.pinInstructions, "Open the Robotics Part Requests extension, enter the site address and this PIN.");
+  assert.equal(model.pinShownOnceNote, "This PIN is shown only once. It disappears when it expires or when you close this window.");
+  assert.equal(model.pinExpiredText, "That PIN has expired and was removed from the screen. Generate another if it is still needed.");
+  assert.equal(model.pinSearchLabel, "Find a member");
+  assert.equal(model.pinResultTitle("Test Student A"), "PIN for Test Student A");
+  assert.equal(model.pinExpiryText(at + model.pinLifetimeMs, zone), "Expires at 2:24 PM (10 minutes)");
+  assert.equal(model.pinLifetimeMs, 600_000);
+  assert.equal(model.pinPairedNote(0, 5), "");
+  assert.equal(model.pinPairedNote(2, 5), "They have 2 of 5 devices paired, and those stay paired.");
+  assert.equal(model.pinMemberAtLimit(5), "Has 5 devices. Remove one first.");
+  assert.equal(model.pinMoreMatches(8, 40), "Showing 8 of 40. Type more of a name to narrow the list.");
+  assert.equal(model.pinNoMatches("  zed "), 'No members on the active roster match "zed".');
+  assert.equal(model.pinNoMatches(""), "No members are on the active roster.");
+  assert.equal(model.pinCopied, "Copied the site address and PIN.");
+  assert.equal(model.pinCopyFailed, "Copy did not work. Select the PIN and site address and copy them yourself.");
+  assert.equal(model.pinShareText({ pin: "K7M2-9QXP", siteAddress: "https://site.example.test" }),
+    "Site address: https://site.example.test\nPIN: K7M2-9QXP\nOpen the Robotics Part Requests extension, enter the site address and this PIN. The PIN works once and expires in 10 minutes.");
+});
+
+test("Generate pairing PIN: the picker offers the active roster by name, marks members at the limit, and shows at most eight", async () => {
+  const { pinCandidates, pinPickerSize } = await import("../src/dashboard/part-requests-model.ts");
+  const device = (id: string, memberId: string, memberName: string, memberActive = true): Device => ({ id, label: `Test laptop ${id}`, memberId, memberName, memberActive, createdMs: at, lastUsedMs: null, revokedMs: null });
+  const roster = Array.from({ length: 10 }, (_, index) => ({ id: `m-${index}`, name: `Test Student ${String.fromCharCode(65 + index)}` }));
+  const devices = [...Array.from({ length: 5 }, (_, index) => device(`d${index}`, "m-1", "Test Student B")), device("d9", "m-off", "Test Student Off", false)];
+  const rows = memberRows({ roster, devices }, at);
+  const all = pinCandidates(rows, "", 5);
+  assert.equal(all.total, 10, "off-roster members are not offered");
+  assert.equal(all.shown.length, pinPickerSize);
+  assert.deepEqual(all.shown.slice(0, 2), [{ id: "m-0", name: "Test Student A", atLimit: false }, { id: "m-1", name: "Test Student B", atLimit: true }]);
+  assert.deepEqual(pinCandidates(rows, " student j ", 5), { total: 1, shown: [{ id: "m-9", name: "Test Student J", atLimit: false }] });
+  assert.deepEqual(pinCandidates(rows, "Test laptop", 5), { total: 0, shown: [] }, "names only, not device labels");
+  assert.equal(pinCandidates(rows, "off", 5).total, 0);
+});
