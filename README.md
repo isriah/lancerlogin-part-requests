@@ -2,7 +2,7 @@
 
 Students click a browser extension on a vendor's product page, review the details and create a request in the team's Notion ordering database. LancerLogin holds the Notion token. Students never sign in to LancerLogin.
 
-**Status: Phase 2, with the Carts backend.** The backend and the Admin pages are built: pairing, the Notion connection, the device API, the request log, the recipient job, Core's setup screen and **Settings > Modules > Part Requests**. Carts here means reading open orders and recording who built a cart. Filling store carts belongs to the extension.
+**Status: v1.0.0, stable.** The backend and the Admin pages are built: pairing, the Notion connection, the device API, the request log, the recipient job, Core's setup screen and **Settings > Modules > Part Requests**. Carts here means reading open orders and recording who built a cart. Filling store carts belongs to the extension.
 
 | Plugin | LancerLogin Core | Module SDK | Module contract |
 | --- | --- | --- | --- |
