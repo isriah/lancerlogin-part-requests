@@ -122,6 +122,23 @@ test("create: each failure is classified as certain or uncertain, and POST is ne
   await rejects(client().create({}), { code: "notion_response", uncertain: true });
 });
 
+test("no client error carries the token or Notion's reply, even when Notion echoes them", async () => {
+  const failures: (() => Response)[] = [
+    () => { throw new Error(`socket closed ${testToken}`); },
+    ...[400, 401, 403, 404, 409, 429, 500, 302].map((status) => () => notionResponse({ message: `echo ${testToken}` }, status)),
+    () => new Response(`{bad ${testToken}`),
+    () => notionResponse({ url: `https://evil.example.test/${testToken}` }),
+  ];
+  for (const failure of failures) {
+    stub.on(/^POST \/pages$/, failure);
+    await assert.rejects(client().create({}), (error: unknown) => {
+      assert.ok(error instanceof AppError);
+      assert.ok(!`${error.message} ${error.code} ${JSON.stringify(error.details)} ${error.stack}`.includes(testToken));
+      return true;
+    });
+  }
+});
+
 test("a read failure is never uncertain", async () => {
   stub.on(/^POST \/data_sources/, () => notionResponse({}, 503));
   await rejects(client().requestPeoplePage(schema(), 50), { code: "notion_503", uncertain: false });

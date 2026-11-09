@@ -31,7 +31,7 @@ async function publicRoute(context: ModuleRouteContext<unknown>): Promise<Respon
   if (pathname === `${prefix}/options` && method === "GET") return readOptions(device);
   if (pathname === `${prefix}/recipient` && method === "POST") return saveRecipient(device, await context.json(1024));
   if (pathname === `${prefix}/check` && method === "POST") return checkRepeats(device, await context.json(8192));
-  if (pathname === `${prefix}/requests` && method === "POST") return createRequest(device, await context.json(16_384));
+  if (pathname === `${prefix}/requests` && method === "POST") return createRequest(device, await context.json(32_768));
   if (pathname.startsWith(`${prefix}/requests/`) && method === "GET") return readRequest(device, pathname.slice(`${prefix}/requests/`.length));
   return undefined;
 }
