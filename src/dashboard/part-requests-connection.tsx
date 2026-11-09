@@ -1,4 +1,4 @@
-// The Notion connection card, on Core's setup screen and on the Setup tab, and the setup screen itself. One Verify button
+// The Notion connection card, on Core's setup screen and on the Connection tab, and the setup screen itself. One Verify button
 // saves the token and checks the database together. Core keeps a module open once its setup is complete, so replacing or
 // removing the token later stops requests without closing these pages.
 import { useEffect, useId, useState, type FormEvent } from "react";
@@ -34,7 +34,8 @@ const layout: readonly (readonly [string, string])[] = [
 
 const linkHelp = "Copy the link to the database itself, not a page with a linked view.";
 
-export function ConnectionCard({ status, onStatus, onVerified }: { status: SetupStatus; onStatus: (status: SetupStatus) => void; onVerified?: () => Promise<void> | void }) {
+/** `openSetup` is given on the Connection tab only. There the card also puts any problem and its fix above itself, always lists its facts, and links to Core's setup screen. */
+export function ConnectionCard({ status, onStatus, onVerified, openSetup }: { status: SetupStatus; onStatus: (status: SetupStatus) => void; onVerified?: () => Promise<void> | void; openSetup?: () => void }) {
   const ids = useId();
   const [token, setToken] = useState("");
   const [link, setLink] = useState(status.databaseId ? databaseLink(status.databaseId) : "");
@@ -54,12 +55,14 @@ export function ConnectionCard({ status, onStatus, onVerified }: { status: Setup
   const [focusTarget, setFocusTarget] = useState<string>();
   useEffect(() => { if (focusTarget && !busy) { document.getElementById(focusTarget)?.focus(); setFocusTarget(undefined); } }, [focusTarget, busy]);
   const connected = isConnected(status);
+  const onTab = openSetup !== undefined;
+  const formId = `${ids}form`;
   const tokenId = `${ids}token`; const linkId = `${ids}link`; const newTokenId = `${ids}new-token`; const replaceId = `${ids}replace-button`; const firstSourceId = `${ids}source-0`;
   const name = status.dataSourceName ?? "the ordering database";
 
   async function verify(event: FormEvent) {
     event.preventDefault();
-    if (connected) return;
+    if (connected || busy) return;
     setFormError(""); setResult(undefined);
     const missingToken = !status.tokenSaved && !token.trim() ? "Enter the connection's Notion token." : undefined;
     const missingLink = !link.trim() ? "Enter the database's Notion link." : undefined;
@@ -114,15 +117,33 @@ export function ConnectionCard({ status, onStatus, onVerified }: { status: Setup
   }
 
   const problem = status.problem === "notion_schema_changed" ? connectionProblem(status) : undefined;
-  return <form className="module-setup-card ui-form" noValidate onSubmit={(event) => void verify(event)}>
-    <div className="module-setup-card-heading">
-      <div><p className="kicker">Step 1 - Required</p><h2>Notion connection</h2></div>
-      <Pill badge={connected ? { label: "Connected", tone: "success" } : { label: "Not connected", tone: "neutral" }} />
-    </div>
+  const noEncryption = !status.canSaveToken && <p className="ui-status settings-notice pr-notice" data-tone="error" role="alert">Credential encryption is unavailable on this installation, so a token cannot be saved.</p>;
+  // The fix for what stopped requests: verify with what is saved, or go to the token field. Without encryption there is no fix to offer here.
+  const fix = status.tokenSaved
+    ? <button className="ui-button" type="submit" form={formId} disabled={busy}>{busy ? "Verifying..." : "Verify connection"}</button>
+    : status.canSaveToken ? <button className="ui-button" type="button" onClick={() => setFocusTarget(tokenId)}>Enter token</button> : undefined;
+  const problemText = onTab ? connectionProblem(status) : undefined;
+  const stopped = problemText && status.problem === "notion_schema_changed" ? `${problemText} Then verify the connection again.` : problemText;
+  const setupButton = openSetup && <button className="settings-setup-link" type="button" onClick={openSetup}>Open setup</button>;
+  const facts = <dl className="pr-facts">
+    <div><dt>Data source</dt><dd>{status.dataSourceName ?? (connected ? "Name not recorded" : "Not chosen")}</dd></div>
+    <div><dt>Last verified</dt><dd>{status.verifiedMs ? formatDateTime(status.verifiedMs) : connected ? "Not yet" : "Not verified"}</dd></div>
+    <div><dt>Site address</dt><dd>{status.siteAddress ?? "Not saved"}</dd></div>
+  </dl>;
+  return <>
+  {stopped && <Notice notice={{ tone: "error", content: stopped }} action={fix} />}
+  {onTab && noEncryption}
+  <form id={formId} className={onTab ? "ui-card pr-stack ui-form" : "module-setup-card ui-form"} aria-labelledby={onTab ? `${ids}title` : undefined} noValidate onSubmit={(event) => void verify(event)}>
+    {onTab
+      ? <div className="pr-card-heading"><h2 id={`${ids}title`}>Notion connection</h2><Pill badge={connected ? { label: "Connected", tone: "success" } : { label: "Requests stopped", tone: "error" }} /></div>
+      : <div className="module-setup-card-heading">
+        <div><p className="kicker">Step 1 - Required</p><h2>Notion connection</h2></div>
+        <Pill badge={connected ? { label: "Connected", tone: "success" } : { label: "Not connected", tone: "neutral" }} />
+      </div>}
     {result && <Notice notice={result.notice} focusKey={result.key} />}
     {connected && <p className="ui-status settings-notice pr-notice" data-tone="success" role="status">Connected to {name}. Members can now run <code>/ordering-pin</code> in Discord to pair a device.</p>}
-    {problem && <p className="ui-status settings-notice pr-notice" data-tone="error" role="alert">{problem}</p>}
-    {!status.canSaveToken && <p className="ui-status settings-notice pr-notice" data-tone="error" role="alert">Credential encryption is unavailable on this installation, so a token cannot be saved.</p>}
+    {!onTab && problem && <p className="ui-status settings-notice pr-notice" data-tone="error" role="alert">{problem}</p>}
+    {!onTab && noEncryption}
 
     {!status.tokenSaved && <div className="oauth-walkthrough pr-stack">
       <ol>
@@ -158,11 +179,7 @@ export function ConnectionCard({ status, onStatus, onVerified }: { status: Setup
       </div>
     </div>}
 
-    {connected && <dl className="pr-facts">
-      <div><dt>Data source</dt><dd>{status.dataSourceName ?? "Name not recorded"}</dd></div>
-      <div><dt>Last verified</dt><dd>{status.verifiedMs ? formatDateTime(status.verifiedMs) : "Not yet"}</dd></div>
-      <div><dt>Site address</dt><dd>{status.siteAddress ?? "Not saved"}</dd></div>
-    </dl>}
+    {(connected || onTab) && facts}
 
     {!connected && <>
       <Field id={linkId} label="Database link" help={linkHelp} error={linkError}>
@@ -180,22 +197,27 @@ export function ConnectionCard({ status, onStatus, onVerified }: { status: Setup
         <summary>Expected database layout</summary>
         <ul className="pr-layout">{layout.map(([field, kind]) => <li key={field}><strong>{field}</strong>: {kind}</li>)}</ul>
       </details>}
-      {formError && <p className="ui-status settings-notice pr-notice" data-tone="error" role="alert">{formError}</p>}
-      <div className="module-actions"><button className="ui-button ui-button--primary" type="submit" disabled={busy || !status.tokenSaved && !status.canSaveToken}>{busy ? "Verifying..." : "Verify connection"}</button></div>
+      {/* The tab's Verify button can be far above this, so a failure takes focus there. */}
+      {formError && (onTab
+        ? <Notice notice={{ tone: "error", content: formError }} focusKey={formError} />
+        : <p className="ui-status settings-notice pr-notice" data-tone="error" role="alert">{formError}</p>)}
+      <div className="module-actions"><button className="ui-button ui-button--primary" type="submit" disabled={busy || !status.tokenSaved && !status.canSaveToken}>{busy ? "Verifying..." : "Verify connection"}</button>{setupButton}</div>
     </>}
     {formError && connected && <p className="ui-status settings-notice pr-notice" data-tone="error" role="alert">{formError}</p>}
+    {connected && setupButton && <div className="module-actions">{setupButton}</div>}
 
     {removing && <ConfirmDialog title="Remove the Notion token?" keepLabel="Keep token" confirmLabel="Remove token" busy={busy} error={removeError} onConfirm={() => void removeToken()} onClose={() => setRemoving(false)}
       message="Requests from the browser extension stop at once, until a new token is saved and the connection is verified again. Paired devices stay paired and the log stays." />}
-  </form>;
+  </form>
+  </>;
 }
 
-/** Core's setup screen. Core shows it until setup is complete, and an Admin can reopen it from the Setup tab. */
+/** Core's setup screen. Core shows it until setup is complete, and an Admin can reopen it from the Connection tab. */
 export function PartRequestsSetup({ module, navigate, onReady }: DashboardSetupProps) {
   const { status, setStatus, error, loading, load } = useSetupStatus();
   // Core would reopen setup if it were left before Core had drawn the module as ready, so go to the module's page only then.
   const [finished, setFinished] = useState(false);
-  useEffect(() => { if (finished && module.setup.ready) navigate(`${settingsPath}?section=setup`); }, [finished, module.setup.ready]);
+  useEffect(() => { if (finished && module.setup.ready) navigate(`${settingsPath}?section=connection`); }, [finished, module.setup.ready]);
   return <section className="module-onboarding" aria-labelledby="part-requests-setup-title">
     <div className="page-intro"><p className="kicker">Part Requests module</p><h1 id="part-requests-setup-title">Set up Part Requests</h1><p>Connect the team's Notion ordering database. Requests from the browser extension stay off until the connection is verified.</p></div>
     <LoadState loading={loading && !status} error={error} label="Part Requests setup" onRetry={() => void load()} />

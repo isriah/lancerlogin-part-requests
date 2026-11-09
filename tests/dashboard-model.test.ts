@@ -2,12 +2,21 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  connectionProblem, databaseLink, formatDate, formatDateTime, formatShortDate, formatTime, groupDevices, notionPageLink, pairingNotice, refreshNotice, requestRow, revokeMessage, uncertainBanner, uncertainNote, type Device,
+  adminSection, adminSections, connectionProblem, databaseLink, formatDate, formatDateTime, formatShortDate, formatTime, groupDevices, notionPageLink, pairingNotice, refreshNotice, requestRow, revokeMessage, uncertainBanner, uncertainNote, type Device,
 } from "../src/dashboard/part-requests-model.ts";
 
 const zone = "America/Los_Angeles";
 const at = Date.UTC(2026, 10, 8, 22, 14);
 const databaseId = "11111111-2222-4333-8444-555555555555";
+
+test("the settings page has three tabs, and old Setup and Status links land on Connection", () => {
+  assert.deepEqual(adminSections.map(([, title]) => title), ["Connection", "Requests log", "Paired devices"]);
+  for (const old of ["setup", "status"]) assert.equal(adminSection(old), "connection", old);
+  assert.equal(adminSection(null), "connection");
+  assert.equal(adminSection("nonsense"), "connection");
+  assert.equal(adminSection("requests"), "requests");
+  assert.equal(adminSection("devices"), "devices");
+});
 
 test("dates read as the approved pages show them", () => {
   assert.equal(formatDateTime(at, zone), "Nov 8, 2:14 PM");
@@ -58,14 +67,14 @@ test("the revoke message says what happens and how to undo it", () => {
   assert.equal(revokeMessage({ label: "School Chromebook", memberName: "Test Student A" }), "Test Student A's School Chromebook loses access at once. Its past requests stay in the log. To use it again, Test Student A runs /ordering-pin and pairs it again.");
 });
 
-test("connection problems say what stopped and what to do", () => {
+test("the Connection tab's problem line says what stopped and what to do", () => {
   assert.equal(connectionProblem({ tokenSaved: true, problem: null, schemaError: null }), undefined);
   assert.match(connectionProblem({ tokenSaved: true, problem: "notion_schema_changed", schemaError: 'Notion property "SKU" is wrong.' })!, /no longer matches.*"SKU" is wrong/);
   assert.match(connectionProblem({ tokenSaved: false, problem: "notion_not_connected", schemaError: null })!, /^No Notion token is saved.*after a restore/);
   assert.match(connectionProblem({ tokenSaved: true, problem: "notion_not_connected", schemaError: null })!, /has not been verified/);
 });
 
-test("pairing and refresh notices", () => {
+test("the Connection tab's pairing and recipient notices", () => {
   assert.equal(pairingNotice(null), undefined);
   assert.match(pairingNotice(at, zone)!, /reopens by itself at 2:14 PM\. Devices that are already paired keep working\./);
   assert.equal(refreshNotice(null), undefined);

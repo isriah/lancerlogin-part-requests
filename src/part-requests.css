@@ -41,9 +41,9 @@
 :where([data-module="part-requests"]) .pr-devices td { vertical-align: middle; }
 :where([data-module="part-requests"]) .dialog-backdrop > .pr-dialog[role="dialog"] { width: min(38rem,100%); padding: var(--space-5); }
 
-/* Status: label and value rows. */
-:where([data-module="part-requests"]) .pr-status-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: var(--space-4); align-items: start; }
-:where([data-module="part-requests"]) .pr-status-wide { grid-column: 1 / -1; }
+/* Connection tab: the cards below the Notion card, and label and value rows. */
+:where([data-module="part-requests"]) .pr-connection-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: var(--space-4); align-items: start; }
+:where([data-module="part-requests"]) .pr-connection-wide { grid-column: 1 / -1; }
 :where([data-module="part-requests"]) .pr-facts { margin: 0; }
 :where([data-module="part-requests"]) .pr-facts > div { display: grid; grid-template-columns: minmax(8rem,.7fr) minmax(0,1fr); gap: var(--space-3); align-items: center; min-width: 0; padding: var(--space-3) 0; border-bottom: 1px solid var(--ui-border); }
 :where([data-module="part-requests"]) .pr-facts > div:last-child { border-bottom: 0; }
@@ -53,8 +53,8 @@
 :where([data-module="part-requests"]) .pr-notice-action > span { flex: 1 1 18rem; min-width: 0; }
 
 @media (max-width: 800px) {
-  :where([data-module="part-requests"]) .pr-status-grid { grid-template-columns: minmax(0,1fr); }
-  :where([data-module="part-requests"]) .pr-status-wide { grid-column: auto; }
+  :where([data-module="part-requests"]) .pr-connection-grid { grid-template-columns: minmax(0,1fr); }
+  :where([data-module="part-requests"]) .pr-connection-wide { grid-column: auto; }
   :where([data-module="part-requests"]) .pr-layout { grid-template-columns: minmax(0,1fr); }
   :where([data-module="part-requests"]) .pr-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   :where([data-module="part-requests"]) .pr-table,:where([data-module="part-requests"]) .pr-table tbody,:where([data-module="part-requests"]) .pr-table tr,:where([data-module="part-requests"]) .pr-table th,:where([data-module="part-requests"]) .pr-table td { display: block; width: 100%; min-width: 0; }

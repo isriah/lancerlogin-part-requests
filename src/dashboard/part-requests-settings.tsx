@@ -1,23 +1,18 @@
-// Settings > Modules > Part Requests, Admin only: Setup, Requests log, Paired devices and Status.
+// Settings > Modules > Part Requests, Admin only: Connection, Requests log and Paired devices.
 import { useEffect, useRef, useState } from "react";
-import { RouteLink, SettingsSectionNavigation, settingsSectionHref, usePath } from "@lancerlogin/module-sdk/dashboard";
-import { ConnectionCard, setupSummary, useSetupStatus } from "./part-requests-connection";
+import { SettingsSectionNavigation, settingsSectionHref, usePath } from "@lancerlogin/module-sdk/dashboard";
+import { ConnectionCard, useSetupStatus } from "./part-requests-connection";
 import { adminRoute, errorText, request, setupRoute } from "./part-requests-http.ts";
 import {
-  connectionProblem, formatDate, formatDateTime, formatShortDate, groupDevices, isConnected, pairingNotice, refreshNotice, requestRow, revokeMessage, uncertainBanner,
-  type Device, type DeviceList, type LoggedRequest, type RequestLogPage, type SetupStatus,
+  adminSection, adminSections, formatDate, formatDateTime, formatShortDate, groupDevices, isConnected, pairingNotice, refreshNotice, requestRow, revokeMessage, uncertainBanner,
+  type AdminSection, type Device, type DeviceList, type LoggedRequest, type RequestLogPage, type SetupStatus,
 } from "./part-requests-model.ts";
 import { ConfirmDialog, LoadState, Notice, Pill } from "./part-requests-ui";
 
-const sections = [["setup", "Setup"], ["requests", "Requests log"], ["devices", "Paired devices"], ["status", "Status"]] as const;
-type Section = (typeof sections)[number][0];
-const isSection = (value: string | null): value is Section => sections.some(([id]) => id === value);
-
 export function PartRequestsSettings({ openSetup }: { openSetup: () => void }) {
   const { path, search, navigate } = usePath();
-  const requested = new URLSearchParams(search).get("section");
-  const section: Section = isSection(requested) ? requested : "setup";
-  const hrefFor = (id: Section) => settingsSectionHref(path, search, id);
+  const section = adminSection(new URLSearchParams(search).get("section"));
+  const hrefFor = (id: AdminSection) => settingsSectionHref(path, search, id);
   const { status, setStatus, error, loading, load } = useSetupStatus();
   // Each tab shows fresh facts when it opens. The hook has already loaded them for the first one.
   const opened = useRef(section);
@@ -25,18 +20,16 @@ export function PartRequestsSettings({ openSetup }: { openSetup: () => void }) {
   return <section className="settings-page" aria-labelledby="part-requests-title">
     <div className="page-intro"><h1 id="part-requests-title">Part Requests</h1></div>
     <div className="settings-section-toolbar">
-      <SettingsSectionNavigation label="Part Requests sections" pickerLabel="Part Requests section" sections={sections.map(([id, title]) => [hrefFor(id), title] as [string, string])} currentHref={hrefFor(section)} navigate={navigate} />
+      <SettingsSectionNavigation label="Part Requests sections" pickerLabel="Part Requests section" sections={adminSections.map(([id, title]) => [hrefFor(id), title] as [string, string])} currentHref={hrefFor(section)} navigate={navigate} />
     </div>
     <div className="pr-stack">
       <LoadState loading={loading && !status} error={error} label="Part Requests" onRetry={() => void load()} />
-      {status && section === "setup" && <>
-        {setupSummary(status)}
-        <ConnectionCard status={status} onStatus={setStatus} />
-        <div className="module-actions"><button className="settings-setup-link" type="button" onClick={openSetup}>Open setup screen</button></div>
+      {status && section === "connection" && <>
+        <ConnectionCard status={status} onStatus={setStatus} openSetup={openSetup} />
+        <ConnectionDetails status={status} reload={() => load()} onStatus={setStatus} />
       </>}
       {status && section === "requests" && <RequestsLog databaseId={status.databaseId} />}
       {section === "devices" && <PairedDevices />}
-      {status && section === "status" && <StatusSection status={status} setupHref={hrefFor("setup")} navigate={navigate} reload={() => load()} onStatus={setStatus} />}
     </div>
   </section>;
 }
@@ -153,7 +146,7 @@ function CartsCard({ status, onStatus }: { status: SetupStatus; onStatus: (statu
     catch (caught) { setError(errorText(caught, "Carts could not be changed.")); }
     finally { setBusy(false); }
   }
-  return <section className="ui-card pr-stack pr-status-wide" aria-labelledby="pr-carts-title">
+  return <section className="ui-card pr-stack pr-connection-wide" aria-labelledby="pr-carts-title">
     <div className="pr-card-heading"><h2 id="pr-carts-title">Carts</h2><Pill badge={status.cartsEnabled ? { label: "On", tone: "success" } : { label: "Off", tone: "neutral" }} /></div>
     {error && <p className="ui-status settings-notice pr-notice" data-tone="error" role="alert">{error}</p>}
     <label className="pr-choice"><input type="checkbox" role="switch" checked={status.cartsEnabled} disabled={busy} aria-describedby="pr-carts-help" onChange={(event) => void save(event.target.checked)} /><span>Let paired devices use Carts</span></label>
@@ -161,9 +154,9 @@ function CartsCard({ status, onStatus }: { status: SetupStatus; onStatus: (statu
   </section>;
 }
 
-function StatusSection({ status, setupHref, navigate, reload, onStatus }: { status: SetupStatus; setupHref: string; navigate: (path: string) => void; reload: () => Promise<void>; onStatus: (status: SetupStatus) => void }) {
+/** The rest of the Connection tab, below the Notion card: the recipient list, pairing and Carts. */
+function ConnectionDetails({ status, reload, onStatus }: { status: SetupStatus; reload: () => Promise<void>; onStatus: (status: SetupStatus) => void }) {
   const connected = isConnected(status);
-  const problem = connectionProblem(status);
   const [refresh, setRefresh] = useState<{ busy: boolean; requested: boolean; error: string }>({ busy: false, requested: false, error: "" });
   const result = useRef<HTMLParagraphElement>(null);
   async function refreshNow() {
@@ -175,22 +168,9 @@ function StatusSection({ status, setupHref, navigate, reload, onStatus }: { stat
       result.current?.focus();
     } catch (caught) { setRefresh({ busy: false, requested: false, error: errorText(caught, "The refresh could not be requested.") }); }
   }
-  const setupLink = (className: string) => <RouteLink href={setupHref} currentPath="" navigate={navigate} className={className}>Open setup</RouteLink>;
   const refreshProblem = refreshNotice(status.refresh);
   const pauseNotice = pairingNotice(status.pairingPausedUntilMs);
-  return <div className="pr-status-grid">
-    <section className="ui-card pr-stack pr-status-wide" aria-labelledby="pr-connection-title">
-      <div className="pr-card-heading"><h2 id="pr-connection-title">Notion connection</h2><Pill badge={connected ? { label: "Connected", tone: "success" } : { label: "Requests stopped", tone: "error" }} /></div>
-      {problem && <Notice notice={{ tone: "error", content: problem }} action={setupLink("ui-button")} />}
-      <dl className="pr-facts">
-        <div><dt>Token</dt><dd>{status.tokenSaved ? "Saved" : "Not saved"}</dd></div>
-        <div><dt>Data source</dt><dd>{status.dataSourceName ?? "Not chosen"}</dd></div>
-        <div><dt>Last verified</dt><dd>{status.verifiedMs ? formatDateTime(status.verifiedMs) : "Not verified"}</dd></div>
-        <div><dt>Site address</dt><dd>{status.siteAddress ?? "Not saved"}</dd></div>
-      </dl>
-      {!problem && <div className="module-actions">{setupLink("settings-setup-link")}</div>}
-    </section>
-
+  return <div className="pr-connection-grid">
     <section className="ui-card pr-stack" aria-labelledby="pr-recipients-title">
       <div className="pr-card-heading"><h2 id="pr-recipients-title">Recipient list</h2></div>
       <dl className="pr-facts">

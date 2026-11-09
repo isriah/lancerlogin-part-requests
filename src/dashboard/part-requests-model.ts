@@ -21,6 +21,13 @@ export type Device = {
 };
 export type DeviceList = { readonly devices: readonly Device[]; readonly limitPerMember: number };
 
+// ---- Sections of the settings page
+export const adminSections = [["connection", "Connection"], ["requests", "Requests log"], ["devices", "Paired devices"]] as const;
+export type AdminSection = (typeof adminSections)[number][0];
+
+/** The section a link asks for. Anything else opens Connection, which includes `setup` and `status`, the tabs it replaced. */
+export const adminSection = (requested: string | null): AdminSection => adminSections.find(([id]) => id === requested)?.[0] ?? "connection";
+
 // ---- Dates, in the viewer's own time zone unless a test names one.
 const format = (options: Intl.DateTimeFormatOptions, ms: number, timeZone?: string) =>
   new Intl.DateTimeFormat("en-US", { ...options, ...(timeZone ? { timeZone } : {}) }).format(ms).replace(/ /g, " ");

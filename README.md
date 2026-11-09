@@ -10,14 +10,13 @@ Students click a browser extension on a vendor's product page, review the detail
 
 ## Admin pages
 
-**Settings > Modules > Part Requests**, Admin only, has four sections:
+**Settings > Modules > Part Requests**, Admin only, has three sections:
 
-- **Setup:** the connection and its token, with Replace and Remove, and a link to Core's setup screen. Core shows that screen by itself until setup is complete. One Verify button saves the token and checks the database together.
+- **Connection:** any problem and its fix at the top, then the Notion connection and its token, with Replace and Remove, the data source, last verified time, site address and Open setup, which reopens Core's setup screen; the repair fields whenever requests have stopped, as Core does not reopen setup by itself after a token is removed; the recipient list with Refresh now; pairing, with a notice while it is paused; and the Carts switch. One Verify button saves the token and checks the database together. Old `?section=setup` and `?section=status` links open this section.
 - **Requests log:** every request with its member and device, newest first, with a banner when any result is uncertain.
 - **Paired devices:** grouped by member, with Revoke. It also shows a member at the limit of 5 and a member who left the active roster.
-- **Status:** the connection, the recipient list with Refresh now, whether pairing is paused, and the Carts switch.
 
-Core keeps a module open once its setup is complete, so replacing or removing the token later stops requests without closing these pages.
+Core shows its own setup screen by itself until setup is complete, and an Admin can reopen it from Connection. Core keeps a module open once its setup is complete, so replacing or removing the token later stops requests without closing these pages.
 
 ## Setup (Admin)
 
