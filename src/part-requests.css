@@ -94,7 +94,8 @@
 :where([data-module="part-requests"]) .pr-pin-site { user-select: all; }
 :where([data-module="part-requests"]) .pr-pin-picker { gap: var(--space-2); }
 :where([data-module="part-requests"]) .pr-pin-picker .pr-member-list { max-height: 22rem; overflow-y: auto; }
-:where([data-module="part-requests"]) .pr-pin-option { display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: var(--space-1) var(--space-3); min-height: var(--control-min-block-size); padding: var(--space-1) var(--space-3); font-weight: 400; cursor: pointer; }
+:where([data-module="part-requests"]) .pr-pin-option { display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: var(--space-1) var(--space-3); min-height: var(--control-min-block-size); margin: 0; padding: var(--space-1) var(--space-3); font-weight: 400; cursor: pointer; }
+:where([data-module="part-requests"]) .pr-pin-option > * { grid-area: auto; margin: 0; }
 :where([data-module="part-requests"]) .pr-pin-option:hover { background: var(--ui-surface-subtle); }
 :where([data-module="part-requests"]) .pr-pin-option:has(input:checked) { background: color-mix(in srgb,var(--primary) 22%,var(--ui-surface)); }
 :where([data-module="part-requests"]) .pr-pin-option:has(input:focus-visible) { outline: 3px solid var(--ui-focus); outline-offset: -3px; }
