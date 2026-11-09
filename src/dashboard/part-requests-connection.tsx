@@ -150,7 +150,7 @@ export function ConnectionCard({ status, onStatus, onVerified, openSetup }: { st
   {onTab && noEncryption}
   <form id={formId} className={onTab ? "ui-card pr-stack ui-form" : "module-setup-card ui-form"} aria-labelledby={onTab ? `${ids}title` : undefined} noValidate onSubmit={(event) => void verify(event)}>
     {onTab
-      ? <div className="pr-card-heading"><h2 id={`${ids}title`}>Notion connection</h2><Pill badge={connected ? { label: "Connected", tone: "success" } : { label: "Requests stopped", tone: "error" }} /></div>
+      ? <div className="pr-card-heading"><h2 id={`${ids}title`}>Notion connection</h2><Pill badge={connected ? { label: "Connected", tone: "success" } : { label: "Needs attention", tone: "error" }} /></div>
       : <div className="module-setup-card-heading">
         <div><p className="kicker">Step 1 - Required</p><h2>Notion connection</h2></div>
         <Pill badge={connected ? { label: "Connected", tone: "success" } : { label: "Not connected", tone: "neutral" }} />
