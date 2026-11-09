@@ -54,7 +54,7 @@ export function ConfirmDialog({ title, message, keepLabel, confirmLabel, busy, e
     <section ref={dialog} className="ui-dialog pr-dialog" role="dialog" aria-modal="true" aria-labelledby={`${id}title`} aria-describedby={`${id}body`} tabIndex={-1}>
       <div className="dialog-heading">
         <h2 id={`${id}title`}>{title}</h2>
-        <button className="ui-button" type="button" aria-label={`Close: ${keepLabel}`} disabled={busy} onClick={close}><span aria-hidden="true">×</span></button>
+        <button className="ui-button" type="button" aria-label="Close" disabled={busy} onClick={close}><span aria-hidden="true">×</span></button>
       </div>
       <div className="pr-stack">
         <p id={`${id}body`}>{message}</p>

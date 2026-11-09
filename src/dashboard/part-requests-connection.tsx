@@ -1,7 +1,7 @@
 // The Notion connection card, on Core's setup screen and on the Setup tab, and the setup screen itself. One Verify button
 // saves the token and checks the database together. Core keeps a module open once its setup is complete, so replacing or
 // removing the token later stops requests without closing these pages.
-import { useEffect, useId, useRef, useState, type FormEvent } from "react";
+import { useEffect, useId, useState, type FormEvent } from "react";
 import type { DashboardSetupProps } from "@lancerlogin/module-sdk/dashboard";
 import { errorText, recordSetupStep, request, RequestError, setupRoute, type DataSource } from "./part-requests-http.ts";
 import { connectionProblem, databaseLink, formatDateTime, isConnected, type SetupStatus } from "./part-requests-model.ts";
@@ -50,12 +50,12 @@ export function ConnectionCard({ status, onStatus, onVerified }: { status: Setup
   const [removing, setRemoving] = useState(false);
   const [removeError, setRemoveError] = useState("");
   const [result, setResult] = useState<{ notice: NoticeValue; key: number }>();
-  const replaceButton = useRef<HTMLButtonElement>(null);
-  const firstSource = useRef<HTMLInputElement>(null);
+  // Fields are disabled while busy and may not be drawn yet, so focus moves once React has settled.
+  const [focusTarget, setFocusTarget] = useState<string>();
+  useEffect(() => { if (focusTarget && !busy) { document.getElementById(focusTarget)?.focus(); setFocusTarget(undefined); } }, [focusTarget, busy]);
   const connected = isConnected(status);
-  const tokenId = `${ids}token`; const linkId = `${ids}link`; const newTokenId = `${ids}new-token`;
+  const tokenId = `${ids}token`; const linkId = `${ids}link`; const newTokenId = `${ids}new-token`; const replaceId = `${ids}replace-button`; const firstSourceId = `${ids}source-0`;
   const name = status.dataSourceName ?? "the ordering database";
-  const focus = (id: string) => window.requestAnimationFrame(() => document.getElementById(id)?.focus());
 
   async function verify(event: FormEvent) {
     event.preventDefault();
@@ -64,8 +64,8 @@ export function ConnectionCard({ status, onStatus, onVerified }: { status: Setup
     const missingToken = !status.tokenSaved && !token.trim() ? "Enter the connection's Notion token." : undefined;
     const missingLink = !link.trim() ? "Enter the database's Notion link." : undefined;
     setTokenError(missingToken); setLinkError(missingLink);
-    if (missingToken) { focus(tokenId); return; }
-    if (missingLink) { focus(linkId); return; }
+    if (missingToken) { setFocusTarget(tokenId); return; }
+    if (missingLink) { setFocusTarget(linkId); return; }
     setBusy(true);
     try {
       const next = await request<SetupStatus>(`${setupRoute}/verify`, "POST", { ...(status.tokenSaved ? {} : { token: token.trim() }), databaseUrl: link.trim(), ...(sourceId ? { dataSourceId: sourceId } : {}) });
@@ -80,26 +80,26 @@ export function ConnectionCard({ status, onStatus, onVerified }: { status: Setup
         setSourceId(caught.dataSources.find((source) => source.id === sourceId)?.id ?? caught.dataSources[0]?.id ?? "");
         setToken("");
         onStatus(await request<SetupStatus>(`${setupRoute}/status`));
-        window.requestAnimationFrame(() => firstSource.current?.focus());
-      } else if (caught instanceof RequestError && (caught.code === "notion_token_rejected" || caught.code === "invalid_token") && !status.tokenSaved) { setTokenError(caught.message); focus(tokenId); }
-      else if (caught instanceof RequestError && caught.code === "invalid_link") { setLinkError(caught.message); focus(linkId); }
+        setFocusTarget(firstSourceId);
+      } else if (caught instanceof RequestError && (caught.code === "notion_token_rejected" || caught.code === "invalid_token") && !status.tokenSaved) { setTokenError(caught.message); setFocusTarget(tokenId); }
+      else if (caught instanceof RequestError && caught.code === "invalid_link") { setLinkError(caught.message); setFocusTarget(linkId); }
       else setFormError(errorText(caught, "The connection could not be verified."));
     } finally { setBusy(false); }
   }
 
   function closeReplace() {
     setReplacing(false); setNewToken(""); setReplaceError(undefined);
-    window.requestAnimationFrame(() => replaceButton.current?.focus());
+    setFocusTarget(replaceId);
   }
 
   async function saveNewToken() {
-    if (!newToken.trim()) { setReplaceError("Enter the new Notion token."); focus(newTokenId); return; }
+    if (!newToken.trim()) { setReplaceError("Enter the new Notion token."); setFocusTarget(newTokenId); return; }
     setBusy(true); setReplaceError(undefined); setResult(undefined);
     try {
       onStatus(await request<SetupStatus>(`${setupRoute}/token`, "PUT", { token: newToken.trim() }));
       setResult({ notice: { content: "New token saved. Verify the connection to turn requests back on." }, key: Date.now() });
       setReplacing(false); setNewToken("");
-    } catch (caught) { setReplaceError(errorText(caught, "The token could not be saved.")); focus(newTokenId); }
+    } catch (caught) { setReplaceError(errorText(caught, "The token could not be saved.")); setFocusTarget(newTokenId); }
     finally { setBusy(false); }
   }
 
@@ -141,7 +141,7 @@ export function ConnectionCard({ status, onStatus, onVerified }: { status: Setup
       <div className="saved-credentials" role="group" aria-label="Notion connection token">
         <span className="pr-saved-state"><strong>Notion connection token</strong><Pill badge={{ label: "Saved", tone: "success" }} /></span>
         <span className="saved-credentials-actions">
-          <button ref={replaceButton} className="ui-button" type="button" disabled={busy} aria-expanded={replacing} aria-controls={`${ids}replace`} onClick={() => { if (replacing) closeReplace(); else { setReplacing(true); focus(newTokenId); } }}>Replace token</button>
+          <button id={replaceId} className="ui-button" type="button" disabled={busy} aria-expanded={replacing} aria-controls={`${ids}replace`} onClick={() => { if (replacing) closeReplace(); else { setReplacing(true); setFocusTarget(newTokenId); } }}>Replace token</button>
           <button className="ui-button ui-button--danger" type="button" disabled={busy} onClick={() => { setRemoveError(""); setRemoving(true); }}>Remove token</button>
         </span>
       </div>
@@ -173,7 +173,7 @@ export function ConnectionCard({ status, onStatus, onVerified }: { status: Setup
         <legend>Data source</legend>
         <span className="field-help">This database has multiple data sources. Select the ordering data source.</span>
         <div className="pr-choice-group">{sources.map((source, index) => <label className="pr-choice" key={source.id}>
-          <input ref={index === 0 ? firstSource : undefined} type="radio" name={`${ids}source`} checked={sourceId === source.id} onChange={() => setSourceId(source.id)} /> {source.name || "Unnamed data source"}
+          <input id={`${ids}source-${index}`} type="radio" name={`${ids}source`} checked={sourceId === source.id} onChange={() => setSourceId(source.id)} /> {source.name || "Unnamed data source"}
         </label>)}</div>
       </fieldset>}
       {!status.tokenSaved && <details className="settings-disclosure">
@@ -191,14 +191,17 @@ export function ConnectionCard({ status, onStatus, onVerified }: { status: Setup
 }
 
 /** Core's setup screen. Core shows it until setup is complete, and an Admin can reopen it from the Setup tab. */
-export function PartRequestsSetup({ navigate, onReady }: DashboardSetupProps) {
+export function PartRequestsSetup({ module, navigate, onReady }: DashboardSetupProps) {
   const { status, setStatus, error, loading, load } = useSetupStatus();
+  // Core would reopen setup if it were left before Core had drawn the module as ready, so go to the module's page only then.
+  const [finished, setFinished] = useState(false);
+  useEffect(() => { if (finished && module.setup.ready) navigate(`${settingsPath}?section=setup`); }, [finished, module.setup.ready]);
   return <section className="module-onboarding" aria-labelledby="part-requests-setup-title">
     <div className="page-intro"><p className="kicker">Part Requests module</p><h1 id="part-requests-setup-title">Set up Part Requests</h1><p>Connect the team's Notion ordering database. Requests from the browser extension stay off until the connection is verified.</p></div>
     <LoadState loading={loading && !status} error={error} label="Part Requests setup" onRetry={() => void load()} />
     {status && <>
       {setupSummary(status)}
-      <ConnectionCard status={status} onStatus={setStatus} onVerified={async () => { await onReady(); navigate(`${settingsPath}?section=setup`); }} />
+      <ConnectionCard status={status} onStatus={setStatus} onVerified={async () => { await onReady(); setFinished(true); }} />
     </>}
   </section>;
 }

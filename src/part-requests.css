@@ -10,10 +10,13 @@
 :where([data-module="part-requests"]) .pr-card-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2) var(--space-3); min-height: var(--control-min-block-size); }
 :where([data-module="part-requests"]) .pr-card-heading > * { margin: 0; }
 
+/* The primary color can be too dark to read as small text on a dark card, so kickers use the same mix as links. */
+:where([data-module="part-requests"]) p.kicker { color: color-mix(in srgb,var(--primary) 30%,var(--ui-text)); }
+
 /* Forms */
 :where([data-module="part-requests"]) .pr-field { display: grid; gap: var(--space-2); min-width: 0; margin: 0; padding: 0; border: 0; }
 :where([data-module="part-requests"]) .pr-field > label,:where([data-module="part-requests"]) .pr-field > legend { margin: 0 0 var(--space-1); padding: 0; }
-:where([data-module="part-requests"]) .pr-field-error { color: var(--ui-error); font-weight: 700; }
+:where([data-module="part-requests"]) .field-help.pr-field-error { color: var(--ui-error); font-weight: 700; }
 :where([data-module="part-requests"]) .pr-choice { display: flex; align-items: center; gap: var(--space-3); min-height: var(--control-min-block-size); font-weight: 500; cursor: pointer; }
 :where([data-module="part-requests"]) .pr-choice-group { display: grid; gap: var(--space-1); }
 :where([data-module="part-requests"]) .pr-replace { display: grid; gap: var(--space-3); }
@@ -68,6 +71,8 @@
   :where([data-module="part-requests"]) .pr-devices td.pr-device-action { display: block; }
   :where([data-module="part-requests"]) .pr-devices td.pr-device-action button.ui-button { width: 100%; }
   :where([data-module="part-requests"]) .pr-facts > div { grid-template-columns: minmax(6.5rem,.6fr) minmax(0,1fr); }
+  :where([data-module="part-requests"]) .pr-dialog .dialog-actions { display: grid; grid-template-columns: minmax(0,1fr); }
+  :where([data-module="part-requests"]) .pr-dialog .dialog-actions button.ui-button { width: 100%; }
   :where([data-module="part-requests"]) .saved-credentials-actions { width: 100%; }
   :where([data-module="part-requests"]) .saved-credentials-actions .ui-button { flex: 1 1 auto; }
 }
