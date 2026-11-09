@@ -27,12 +27,15 @@ const manifest = {
       "part_requests_settings", "part_requests_pairing_pins", "part_requests_devices", "part_requests_pairing_limits",
       "part_requests_notion", "part_requests_submissions", "part_requests_device_limits", "part_requests_pairing_address_limits",
       "part_requests_recipients", "part_requests_recipient_refresh", "part_requests_member_recipients",
+      "part_requests_orders_state", "part_requests_orders_cache", "part_requests_cart_marks",
     ],
     sharedFields: [],
     transientAuthority: [],
   },
   // Only the site address travels in a backup. After a restore every device pairs again and an Admin re-enters the Notion
-  // token, and the request log, recipients and each member's chosen person start empty.
+  // token, and the request log, recipients and each member's chosen person start empty. The orders copy and cart marks don't
+  // travel either: the copy is rebuilt from Notion in a minute, and a mark names a device that has to pair again and expires anyway.
+  // carts_enabled is deliberately not among the settings columns in api.ts, so the Carts switch returns to on after a restore.
   backup: {
     version: 1,
     tables: ["part_requests_settings"],
@@ -40,6 +43,7 @@ const manifest = {
       "part_requests_pairing_pins", "part_requests_devices", "part_requests_pairing_limits",
       "part_requests_notion", "part_requests_submissions", "part_requests_device_limits", "part_requests_pairing_address_limits",
       "part_requests_recipients", "part_requests_recipient_refresh", "part_requests_member_recipients",
+      "part_requests_orders_state", "part_requests_orders_cache", "part_requests_cart_marks",
     ],
   },
   lifecycle: {
@@ -48,9 +52,10 @@ const manifest = {
       "platform_module_setup_progress:part-requests", "platform_module_assignments:part-requests",
       "part_requests_notion", "part_requests_submissions", "part_requests_device_limits", "part_requests_pairing_address_limits",
       "part_requests_recipients", "part_requests_recipient_refresh", "part_requests_member_recipients",
+      "part_requests_cart_marks", "part_requests_orders_cache", "part_requests_orders_state",
     ],
   },
-  deletedData: ["Part Requests settings, pairing PINs and paired devices, the Notion token and connection, the request log, recipients and each member's chosen person"],
+  deletedData: ["Part Requests settings, pairing PINs and paired devices, the Notion token and connection, the request log, recipients, each member's chosen person, the copy of open orders and cart marks"],
 } as const;
 
 export default manifest;

@@ -3,7 +3,7 @@
 // Duplicate protection: a submission ID's row is written before Notion is called, and only the request that wrote it calls
 // Notion. Anything else with that ID gets the recorded result. A row still pending after the Notion timeout means the Worker
 // stopped without an answer (the client can disconnect mid-request), so it reads as uncertain and is never sent again.
-import { connectionProblem, parseSchema, readConnection, savedToken, type Credentials } from "./connection.ts";
+import { connectionProblem, parseSchema, readCartsEnabled, readConnection, savedToken, type Credentials } from "./connection.ts";
 import { json, object, refuse } from "./http.ts";
 import { AppError, databaseLink, NotionClient, pagePayload, parseDraft, statusIncomplete, statusNormal, validateDraft, type RequestDraft } from "./notion.ts";
 import { deviceKeyHash, deviceRefusedMessage, installationId, readDevice, sha256Hex, type AuthenticatedDevice, type Database } from "./pairing.ts";
@@ -46,21 +46,21 @@ function readRepeats(db: Database, urlKey: string, skuKey: string, now: number) 
     .bind(installationId, now - repeatWindowMs, urlKey, skuKey).all<{ memberName: string; createdMs: number; pageUrl: string | null; state: string }>().then((result) => result.results ?? []);
 }
 
-const countStatement = (db: Database, deviceId: string, bucket: "create" | "general", now: number) =>
+export const countStatement = (db: Database, deviceId: string, bucket: "create" | "general", now: number) =>
   db.prepare(`INSERT INTO part_requests_device_limits(installation_id,device_id,bucket,window_start_ms,requests) VALUES (?1,?2,?3,?4,1)
     ON CONFLICT(installation_id,device_id,bucket) DO UPDATE SET
       requests=CASE WHEN window_start_ms<=?5 THEN 1 ELSE requests+1 END,
       window_start_ms=CASE WHEN window_start_ms<=?5 THEN ?4 ELSE window_start_ms END
     RETURNING requests,window_start_ms AS windowStart`).bind(installationId, deviceId, bucket, now, now - limitWindowMs);
 
-type Count = { readonly requests: number; readonly windowStart: number };
-const rateLimited = (count: Count, now: number) => {
+export type Count = { readonly requests: number; readonly windowStart: number };
+export const rateLimited = (count: Count, now: number) => {
   const seconds = Math.max(1, Math.ceil((Number(count.windowStart) + limitWindowMs - now) / 1000));
   return refuse(429, "rate_limited", "This device has sent too many requests. Wait a few minutes and try again.", {}, seconds);
 };
 
 /** Count one write for the device. Returns the refusal when it is over the limit. */
-async function consumeGeneral(db: Database, device: Pick<AuthenticatedDevice, "deviceId">, now: number): Promise<Response | undefined> {
+export async function consumeGeneral(db: Database, device: Pick<AuthenticatedDevice, "deviceId">, now: number): Promise<Response | undefined> {
   const count = await countStatement(db, device.deviceId, "general", now).first<Count>();
   return count && Number(count.requests) > maximumGeneral ? rateLimited(count, now) : undefined;
 }
@@ -71,9 +71,10 @@ export type DeviceRequest = { readonly db: Database; readonly authorization: str
 export async function readOptions({ db, authorization }: DeviceRequest): Promise<Response> {
   const keyHash = await deviceKeyHash(authorization);
   if (!keyHash) return pairAgain();
-  const [device, connection, people, refresh] = await Promise.all([
+  const [device, connection, cartsEnabled, people, refresh] = await Promise.all([
     readDevice(db, keyHash),
     readConnection(db),
+    readCartsEnabled(db),
     db.prepare("SELECT notion_user_id AS id,name FROM part_requests_recipients WHERE installation_id=? ORDER BY name COLLATE NOCASE,notion_user_id LIMIT 2000").bind(installationId).all<{ id: string; name: string }>(),
     db.prepare("SELECT finished_ms AS finishedMs FROM part_requests_recipient_refresh WHERE installation_id=?").bind(installationId).first<{ finishedMs: number | null }>(),
   ]);
@@ -87,6 +88,7 @@ export async function readOptions({ db, authorization }: DeviceRequest): Promise
     defaultRecipientId: chosen && recipients.some((person) => person.id === chosen.id) ? chosen.id : null,
     statuses: [statusNormal, statusIncomplete], vendors: vendors.map((vendor) => vendor.label), recipientsUpdatedMs: refresh?.finishedMs ?? null,
     minimumExtensionVersion, updateUrl: extensionUpdateUrl, databaseLink: connection?.databaseId ? databaseLink(connection.databaseId) : null,
+    cartsEnabled,
   });
 }
 

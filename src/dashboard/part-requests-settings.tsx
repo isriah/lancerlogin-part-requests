@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { RouteLink, SettingsSectionNavigation, settingsSectionHref, usePath } from "@lancerlogin/module-sdk/dashboard";
 import { ConnectionCard, setupSummary, useSetupStatus } from "./part-requests-connection";
-import { adminRoute, errorText, request } from "./part-requests-http.ts";
+import { adminRoute, errorText, request, setupRoute } from "./part-requests-http.ts";
 import {
   connectionProblem, formatDate, formatDateTime, formatShortDate, groupDevices, isConnected, pairingNotice, refreshNotice, requestRow, revokeMessage, uncertainBanner,
   type Device, type DeviceList, type LoggedRequest, type RequestLogPage, type SetupStatus,
@@ -36,7 +36,7 @@ export function PartRequestsSettings({ openSetup }: { openSetup: () => void }) {
       </>}
       {status && section === "requests" && <RequestsLog databaseId={status.databaseId} />}
       {section === "devices" && <PairedDevices />}
-      {status && section === "status" && <StatusSection status={status} setupHref={hrefFor("setup")} navigate={navigate} reload={() => load()} />}
+      {status && section === "status" && <StatusSection status={status} setupHref={hrefFor("setup")} navigate={navigate} reload={() => load()} onStatus={setStatus} />}
     </div>
   </section>;
 }
@@ -144,7 +144,24 @@ function PairedDevices() {
   </>;
 }
 
-function StatusSection({ status, setupHref, navigate, reload }: { status: SetupStatus; setupHref: string; navigate: (path: string) => void; reload: () => Promise<void> }) {
+function CartsCard({ status, onStatus }: { status: SetupStatus; onStatus: (status: SetupStatus) => void }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function save(enabled: boolean) {
+    setBusy(true); setError("");
+    try { onStatus(await request<SetupStatus>(`${setupRoute}/carts`, "PUT", { enabled })); }
+    catch (caught) { setError(errorText(caught, "Carts could not be changed.")); }
+    finally { setBusy(false); }
+  }
+  return <section className="ui-card pr-stack pr-status-wide" aria-labelledby="pr-carts-title">
+    <div className="pr-card-heading"><h2 id="pr-carts-title">Carts</h2><Pill badge={status.cartsEnabled ? { label: "On", tone: "success" } : { label: "Off", tone: "neutral" }} /></div>
+    {error && <p className="ui-status settings-notice pr-notice" data-tone="error" role="alert">{error}</p>}
+    <label className="pr-choice"><input type="checkbox" role="switch" checked={status.cartsEnabled} disabled={busy} aria-describedby="pr-carts-help" onChange={(event) => void save(event.target.checked)} /><span>Let paired devices use Carts</span></label>
+    <p id="pr-carts-help" className="field-help pr-notice">Carts shows every paired device the team's open orders, with requester names and prices, to fill store carts. It never checks out. Turning this off stops that at once; sending requests is not affected.</p>
+  </section>;
+}
+
+function StatusSection({ status, setupHref, navigate, reload, onStatus }: { status: SetupStatus; setupHref: string; navigate: (path: string) => void; reload: () => Promise<void>; onStatus: (status: SetupStatus) => void }) {
   const connected = isConnected(status);
   const problem = connectionProblem(status);
   const [refresh, setRefresh] = useState<{ busy: boolean; requested: boolean; error: string }>({ busy: false, requested: false, error: "" });
@@ -195,5 +212,7 @@ function StatusSection({ status, setupHref, navigate, reload }: { status: SetupS
         <div><dt>Limit per member</dt><dd>{status.deviceLimit} devices</dd></div>
       </dl>
     </section>
+
+    <CartsCard status={status} onStatus={onStatus} />
   </div>;
 }

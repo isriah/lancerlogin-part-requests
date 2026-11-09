@@ -5,6 +5,7 @@ import { adminRoute } from "./admin.ts";
 import { setupRoute, stepSql, type AdminRouteContext } from "./connection.ts";
 import { json, object, refuse } from "./http.ts";
 import { authenticateDevice, clientAddress, deviceRefusedMessage, exchangePin, installationId, issuePin, type Database } from "./pairing.ts";
+import { clearMarks, readOrders, saveMarks } from "./orders.ts";
 import { refreshRecipients } from "./recipients.ts";
 import { checkRepeats, createRequest, readOptions, readRequest, revokeSelf, saveRecipient, type DeviceRequest } from "./requests.ts";
 
@@ -33,6 +34,9 @@ async function publicRoute(context: ModuleRouteContext<unknown>): Promise<Respon
   if (pathname === `${prefix}/recipient` && method === "POST") return saveRecipient(device, await context.json(1024));
   if (pathname === `${prefix}/check` && method === "POST") return checkRepeats(device, await context.json(8192));
   if (pathname === `${prefix}/requests` && method === "POST") return createRequest(device, await context.json(32_768));
+  if (pathname === `${prefix}/orders` && method === "GET") return readOrders(device, context.url.searchParams.get("refresh") === "1");
+  if (pathname === `${prefix}/orders/marks` && method === "POST") return saveMarks(device, await context.json(16_384));
+  if (pathname === `${prefix}/orders/marks/clear` && method === "POST") return clearMarks(device, await context.json(16_384));
   if (pathname.startsWith(`${prefix}/requests/`) && method === "GET") return readRequest(device, pathname.slice(`${prefix}/requests/`.length));
   return undefined;
 }
@@ -70,6 +74,9 @@ const api = defineApiModule({
       { kind: "delete", table: "part_requests_recipients" },
       { kind: "delete", table: "part_requests_recipient_refresh" },
       { kind: "delete", table: "part_requests_member_recipients" },
+      { kind: "delete", table: "part_requests_cart_marks" },
+      { kind: "delete", table: "part_requests_orders_cache" },
+      { kind: "delete", table: "part_requests_orders_state" },
     ],
   },
   backup: { version: 1, tables: { part_requests_settings: ["installation_id", "site_address", "updated_ms"] } },

@@ -8,7 +8,7 @@ export type SetupStatus = {
   readonly databaseId: string | null; readonly dataSourceId: string | null; readonly dataSourceName: string | null;
   readonly verifiedMs: number | null; readonly schemaError: string | null; readonly problem: string | null;
   readonly recipients: number; readonly refresh: { readonly step: string; readonly finishedMs: number | null; readonly lastError: string | null } | null;
-  readonly pairingPausedUntilMs: number | null; readonly pairedDevices: number; readonly deviceLimit: number;
+  readonly pairingPausedUntilMs: number | null; readonly pairedDevices: number; readonly deviceLimit: number; readonly cartsEnabled: boolean;
 };
 export type LoggedRequest = {
   readonly id: string; readonly memberName: string; readonly deviceLabel: string; readonly state: string; readonly vendor: string; readonly description: string;

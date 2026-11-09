@@ -20,6 +20,15 @@ export type ConnectionRow = {
 export const readConnection = (db: Database) => db.prepare(`SELECT ciphertext,iv,database_id AS databaseId,data_source_id AS dataSourceId,schema_json AS schemaJson,
   verified_ms AS verifiedMs,schema_error AS schemaError FROM part_requests_notion WHERE installation_id=?`).bind(installationId).first<ConnectionRow>();
 
+/** The Admin's Carts switch. On until an Admin turns it off, so a missing settings row reads as on. */
+export const readCartsEnabled = (db: Database) => db.prepare("SELECT carts_enabled AS enabled FROM part_requests_settings WHERE installation_id=?").bind(installationId).first<{ enabled: number }>().then((row) => row?.enabled !== 0);
+
+/** Forget the copy of the open orders: people's names and prices should not outlast the reason for holding them. */
+const clearOrdersStatements = (db: Database): Statement[] => [
+  db.prepare("DELETE FROM part_requests_orders_cache WHERE installation_id=?").bind(installationId),
+  db.prepare(`UPDATE part_requests_orders_state SET published_generation=0,published_ms=NULL,published_truncated=0,published_skipped=0,build_generation=NULL,build_cursor=NULL,build_pages=0,build_started_ms=NULL,build_skipped=0,lease_until_ms=0,last_error=NULL WHERE installation_id=?`).bind(installationId),
+];
+
 export const parseSchema = (row: ConnectionRow | null): Schema | undefined => {
   if (!row?.schemaJson) return undefined;
   try { return JSON.parse(row.schemaJson) as Schema; } catch { return undefined; }
@@ -101,6 +110,8 @@ const connectionStatements = (db: Database, schema: Schema, actor: string, now: 
   // Have the refresh job start from the top on its next run; this write also pokes it.
   db.prepare(`INSERT INTO part_requests_recipient_refresh(installation_id,step,next_due_ms) VALUES (?,'idle',0)
     ON CONFLICT(installation_id) DO UPDATE SET step='idle',cursor=NULL,pages=0,next_due_ms=0`).bind(installationId),
+  // The connection may now point somewhere else, so the copy of the old database's orders goes.
+  ...clearOrdersStatements(db),
   audit(db, actor, "part_requests.connection_verified", now),
 ];
 
@@ -167,7 +178,26 @@ async function verify(context: AdminRouteContext, db: Database, actor: string, n
 async function disconnect(context: AdminRouteContext, db: Database, actor: string, now: number) {
   await db.batch([
     db.prepare("UPDATE part_requests_notion SET ciphertext=NULL,iv=NULL,verified_ms=NULL,updated_ms=? WHERE installation_id=?").bind(now, installationId),
+    ...clearOrdersStatements(db),
     audit(db, actor, "part_requests.token_removed", now),
+  ]);
+  return status(context, db, now);
+}
+
+/**
+ * PUT /carts: { enabled }. The switch lives in the settings row, which holds the site address, so saving it before the token
+ * records that address too, as saving the token would. Turning it off also forgets the copy of the orders.
+ */
+async function saveCarts(context: AdminRouteContext, db: Database, actor: string, now: number) {
+  const input = object(await context.json(1024));
+  if (typeof input.enabled !== "boolean" || Object.keys(input).length !== 1) return refuse(400, "validation", "Send enabled as true or false.");
+  const site = context.dashboardOrigin;
+  if (!usableSite(site)) return siteUnknown();
+  await db.batch([
+    db.prepare("INSERT INTO part_requests_settings(installation_id,site_address,carts_enabled,updated_ms) VALUES (?,?,?,?) ON CONFLICT(installation_id) DO UPDATE SET carts_enabled=excluded.carts_enabled,updated_ms=excluded.updated_ms")
+      .bind(installationId, site, input.enabled ? 1 : 0, now),
+    ...(input.enabled ? [] : clearOrdersStatements(db)),
+    audit(db, actor, input.enabled ? "part_requests.carts_enabled" : "part_requests.carts_disabled", now),
   ]);
   return status(context, db, now);
 }
@@ -176,7 +206,7 @@ async function disconnect(context: AdminRouteContext, db: Database, actor: strin
 async function status(context: AdminRouteContext, db: Database, now: number) {
   const [row, settings, recipients, refresh, addresses, pairing, paired] = await Promise.all([
     readConnection(db),
-    db.prepare("SELECT site_address AS siteAddress FROM part_requests_settings WHERE installation_id=?").bind(installationId).first<{ siteAddress: string }>(),
+    db.prepare("SELECT site_address AS siteAddress,carts_enabled AS cartsEnabled FROM part_requests_settings WHERE installation_id=?").bind(installationId).first<{ siteAddress: string; cartsEnabled: number }>(),
     db.prepare("SELECT COUNT(*) AS count FROM part_requests_recipients WHERE installation_id=?").bind(installationId).first<{ count: number }>(),
     db.prepare("SELECT step,finished_ms AS finishedMs,last_error AS lastError FROM part_requests_recipient_refresh WHERE installation_id=?").bind(installationId).first<{ step: string; finishedMs: number | null; lastError: string | null }>(),
     db.prepare("SELECT COUNT(*) AS count FROM part_requests_pairing_address_limits WHERE installation_id=?").bind(installationId).first<{ count: number }>(),
@@ -195,6 +225,7 @@ async function status(context: AdminRouteContext, db: Database, now: number) {
     // The shared pause, which stops pairing for everyone. Null when pairing is open.
     pairingPausedUntilMs: pausedUntil > now ? pausedUntil : null,
     pairedDevices: Number(paired?.count ?? 0), deviceLimit: maximumDevicesPerMember,
+    cartsEnabled: settings?.cartsEnabled !== 0,
   });
 }
 
@@ -202,12 +233,13 @@ async function status(context: AdminRouteContext, db: Database, now: number) {
 export async function setupRoute(context: AdminRouteContext): Promise<Response | undefined> {
   const path = context.url.pathname.slice("/module-setup/part-requests".length);
   const method = context.request.method;
-  const known = path === "/status" && method === "GET" || path === "/token" && (method === "PUT" || method === "DELETE") || (path === "/database" || path === "/connection" || path === "/verify") && method === "POST";
+  const known = path === "/status" && method === "GET" || path === "/carts" && method === "PUT" || path === "/token" && (method === "PUT" || method === "DELETE") || (path === "/database" || path === "/connection" || path === "/verify") && method === "POST";
   if (!known) return undefined;
   const { userId } = await requireAdmin(context);
   const db = context.db as Database; const now = Date.now();
   if (path === "/status") return status(context, db, now);
   if (path === "/token") return method === "PUT" ? saveToken(context, db, userId, now) : disconnect(context, db, userId, now);
   if (path === "/verify") return verify(context, db, userId, now);
+  if (path === "/carts") return saveCarts(context, db, userId, now);
   return path === "/database" ? listDataSources(context, db) : connect(context, db, userId, now);
 }

@@ -6,5 +6,9 @@
   {
     "name": "0002_notion_and_requests.sql",
     "sha256": "5a424b5e51f0280d8f84ffb23d8d59140188e058c6eb5193c37257fbf86b31fd"
+  },
+  {
+    "name": "0003_carts.sql",
+    "sha256": "507e0499bf82a34f05cac890471b1b85fea20341ae3fe092a0a915e736d2661f"
   }
 ]

@@ -5,6 +5,8 @@ import { parseSchema, readConnection, savedToken, type ConnectionRow, type Crede
 import { AppError, NotionClient, type Person, type Schema } from "./notion.ts";
 import { installationId, type Database } from "./pairing.ts";
 
+/** The copy of open orders is short-lived, so a day-old one is nobody's: people's names and prices should not sit here unused. */
+const ordersRetentionMs = 24 * 60 * 60_000;
 export const refreshIntervalMs = 6 * 60 * 60_000;
 export const refreshRetryMs = 60 * 60_000;
 export const requestPageSize = 50;
@@ -35,6 +37,9 @@ const finishRun = (db: Database, now: number, error: string | null, retryMs: num
     db.prepare("DELETE FROM part_requests_recipients WHERE installation_id=? AND last_seen_ms<?").bind(installationId, now - recipientRetentionMs),
     db.prepare("DELETE FROM part_requests_device_limits WHERE installation_id=? AND window_start_ms<?").bind(installationId, now - pruneAfterMs),
     db.prepare("DELETE FROM part_requests_pairing_address_limits WHERE installation_id=? AND window_start_ms<? AND paused_until_ms<?").bind(installationId, now - pruneAfterMs, now),
+    db.prepare("DELETE FROM part_requests_cart_marks WHERE installation_id=? AND expires_ms<=?").bind(installationId, now),
+    db.prepare("DELETE FROM part_requests_orders_cache WHERE installation_id=?1 AND EXISTS(SELECT 1 FROM part_requests_orders_state s WHERE s.installation_id=?1 AND (s.published_ms IS NULL OR s.published_ms<?2) AND (s.build_started_ms IS NULL OR s.build_started_ms<?2))").bind(installationId, now - ordersRetentionMs),
+    db.prepare("UPDATE part_requests_orders_state SET published_generation=0,published_ms=NULL,build_generation=NULL,build_cursor=NULL,build_pages=0,build_started_ms=NULL WHERE installation_id=?1 AND published_ms<?2 AND (build_started_ms IS NULL OR build_started_ms<?2)").bind(installationId, now - ordersRetentionMs),
   ]),
 ]);
 

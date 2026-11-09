@@ -160,7 +160,7 @@ export function pagePayload(draft: RequestDraft, schema: Schema): Json {
   return { parent: { type: "data_source_id", data_source_id: schema.dataSourceId }, properties };
 }
 
-const validPageUrl = (value: unknown) => {
+export const validPageUrl = (value: unknown) => {
   try {
     const url = new URL(String(value));
     return url.protocol === "https:" && onNotionHost(url.hostname) ? url.href : undefined;
@@ -241,6 +241,22 @@ export class NotionClient {
       for (const user of (property?.people ?? []) as Json[]) if (user.id && user.type !== "bot" && !found.get(String(user.id))) found.set(String(user.id), String(user.name ?? ""));
     }
     return { people: [...found].map(([id, name]) => ({ id, name })), ...(page.has_more && page.next_cursor ? { next: String(page.next_cursor) } : {}) };
+  }
+
+  /**
+   * One page of rows in the given statuses, by the mapped property's ID as Notion reported it. Rows carry every property: asking
+   * for fewer with `filter_properties` silently returned rows without them. Oldest first, so paging stays stable as rows are added.
+   */
+  async openOrdersPage(schema: Schema, statuses: readonly Choice[], pageSize: number, cursor?: string): Promise<{ readonly rows: readonly unknown[]; readonly next?: string }> {
+    const property = schema.properties.status;
+    const page = await this.#request(`/data_sources/${schema.dataSourceId}/query`, "POST", {
+      page_size: pageSize, ...(cursor ? { start_cursor: cursor } : {}),
+      filter: { or: statuses.map((status) => ({ property: property.id, [property.type]: { equals: status.name } })) },
+      sorts: [{ timestamp: "created_time", direction: "ascending" }],
+    });
+    // A malformed reply must not read as "no open orders".
+    if (!Array.isArray(page.results)) throw new AppError("Notion returned an unreadable response.", "notion_response");
+    return { rows: page.results, ...(page.has_more && page.next_cursor ? { next: String(page.next_cursor) } : {}) };
   }
 
   async userName(id: string): Promise<string> { return String((await this.#request(`/users/${id}`)).name ?? ""); }
