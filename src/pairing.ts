@@ -5,8 +5,14 @@
 export const installationId = "primary";
 export const pinLifetimeMs = 10 * 60_000;
 export const maximumDevicesPerMember = 5;
-/** Wrong PINs allowed across the installation in one window before pairing pauses for everybody. */
-export const maximumWrongPins = 20;
+/** Wrong PINs one client address may send in a window before that address is paused. */
+export const maximumWrongPinsPerAddress = 20;
+/**
+ * Wrong PINs across the installation in a window before pairing pauses for everybody. This is the backstop, and the only
+ * limit when no client address reaches the plugin. An 8-character PIN makes guessing impractical at this rate, so it is set
+ * high: anyone who can send this many requests can pause pairing, and availability matters more than a tight limit.
+ */
+export const maximumWrongPins = 200;
 export const wrongPinWindowMs = 10 * 60_000;
 export const pairingPauseMs = 15 * 60_000;
 
@@ -101,10 +107,45 @@ export type ExchangeResult =
 
 const paused = (until: number, now: number): ExchangeResult => ({ status: 429, error: pairingPausedMessage, code: "pairing_paused", retryAfterSeconds: Math.ceil((until - now) / 1000) });
 
+export const defaultDeviceLabel = "Browser extension";
+
+/** A label a person can recognize on the Admin page. Anything unusable falls back to the default rather than failing pairing. */
+export function normalizeDeviceLabel(value: unknown): string {
+  if (typeof value !== "string") return defaultDeviceLabel;
+  const label = value.replace(/\p{C}/gu, " ").replace(/\s+/g, " ").trim().slice(0, 60).trim();
+  return label || defaultDeviceLabel;
+}
+
+/** The address Cloudflare sends for a Worker-to-Worker request between zones. It stands for every client of that Worker. */
+export const workerSubrequestAddress = "2a06:98c0:3600::103";
+
+/**
+ * The client's own address, when one reached this route. Cloudflare sets CF-Connecting-IP itself, so a client cannot choose
+ * it. Through Core's Pages proxy to a Worker on another zone, Cloudflare replaces it with the fixed address above, so a
+ * request that came through a Worker counts as having no address and only the shared backstop applies.
+ */
+export function clientAddress(headers: { get(name: string): string | null }): string | undefined {
+  const address = headers.get("cf-connecting-ip")?.trim().toLowerCase();
+  if (!address || address.length > 64 || address === workerSubrequestAddress || headers.get("cf-worker")) return undefined;
+  return address;
+}
+
+/** The salt comes from the Notion setup row. Without it, for example just after a restore, addresses are not counted. */
+async function addressKey(db: Database, address: string): Promise<string | undefined> {
+  const row = await db.prepare("SELECT address_salt AS salt FROM part_requests_notion WHERE installation_id=?").bind(installationId).first<{ salt: string }>();
+  return row ? sha256Hex(`part-requests:pairing:${row.salt}:${address}`) : undefined;
+}
+
 /** Exchange a PIN for a new device key. The PIN's use and the device row commit together or not at all. */
-export async function exchangePin(db: Database, submitted: unknown, now: number, random: Random = systemRandom): Promise<ExchangeResult> {
-  const limits = await db.prepare("SELECT paused_until_ms AS pausedUntil FROM part_requests_pairing_limits WHERE installation_id=?").bind(installationId).first<{ pausedUntil: number }>();
-  if (limits && limits.pausedUntil > now) return paused(limits.pausedUntil, now);
+export async function exchangePin(db: Database, submitted: unknown, now: number, options: { readonly random?: Random; readonly label?: unknown; readonly address?: string | undefined } = {}): Promise<ExchangeResult> {
+  const random = options.random ?? systemRandom;
+  const addressHash = options.address ? await addressKey(db, options.address) : undefined;
+  const [shared, own] = await Promise.all([
+    db.prepare("SELECT paused_until_ms AS pausedUntil FROM part_requests_pairing_limits WHERE installation_id=?").bind(installationId).first<{ pausedUntil: number }>(),
+    addressHash ? db.prepare("SELECT paused_until_ms AS pausedUntil FROM part_requests_pairing_address_limits WHERE installation_id=? AND address_hash=?").bind(installationId, addressHash).first<{ pausedUntil: number }>() : null,
+  ]);
+  const until = Math.max(Number(shared?.pausedUntil ?? 0), Number(own?.pausedUntil ?? 0));
+  if (until > now) return paused(until, now);
   const pin = normalizePin(submitted);
   // A typing mistake that cannot be a PIN tests nothing, so it does not count towards the pause.
   if (!pin) return { status: 400, error: "Enter the 8-character PIN from Discord.", code: "pin_malformed" };
@@ -116,8 +157,8 @@ export async function exchangePin(db: Database, submitted: unknown, now: number,
   const results = await db.batch([
     db.prepare(`UPDATE part_requests_pairing_pins SET used_ms=?,device_id=? WHERE installation_id=? AND pin_hash=? AND used_ms IS NULL AND cancelled_ms IS NULL AND expires_ms>? AND ${memberLive} AND ${deviceCount}<?`)
       .bind(now, deviceId, installationId, pinHash, now, maximumDevicesPerMember),
-    db.prepare("INSERT INTO part_requests_devices(installation_id,id,key_hash,member_id,created_ms) SELECT installation_id,?,?,member_id,? FROM part_requests_pairing_pins WHERE installation_id=? AND pin_hash=? AND device_id=?")
-      .bind(deviceId, await sha256Hex(deviceKey), now, installationId, pinHash, deviceId),
+    db.prepare("INSERT INTO part_requests_devices(installation_id,id,key_hash,member_id,created_ms,label) SELECT installation_id,?,?,member_id,?,? FROM part_requests_pairing_pins WHERE installation_id=? AND pin_hash=? AND device_id=?")
+      .bind(deviceId, await sha256Hex(deviceKey), now, normalizeDeviceLabel(options.label), installationId, pinHash, deviceId),
   ]);
   if (results[0]?.meta?.changes === 1) {
     const member = await db.prepare("SELECT m.first_name AS firstName,m.last_name AS lastName FROM part_requests_devices d JOIN members m ON m.installation_id=d.installation_id AND m.id=d.member_id WHERE d.installation_id=? AND d.id=?").bind(installationId, deviceId).first<{ firstName: string; lastName: string }>();
@@ -127,34 +168,53 @@ export async function exchangePin(db: Database, submitted: unknown, now: number,
   const full = await db.prepare(`SELECT 1 AS full FROM part_requests_pairing_pins WHERE installation_id=? AND pin_hash=? AND used_ms IS NULL AND cancelled_ms IS NULL AND expires_ms>? AND ${memberLive} AND ${deviceCount}>=?`)
     .bind(installationId, pinHash, now, maximumDevicesPerMember).first();
   if (full) return { status: 409, error: deviceLimitMessage, code: "device_limit" };
-  const pausedUntil = await recordWrongPin(db, now);
+  const pausedUntil = await recordWrongPin(db, now, addressHash);
   return pausedUntil > now ? paused(pausedUntil, now) : { status: 401, error: pinRefusedMessage, code: "pin_refused" };
 }
 
-/** Count one wrong PIN atomically, so parallel guesses cannot all read the same count. Returns when pairing is paused until. */
-export async function recordWrongPin(db: Database, now: number): Promise<number> {
-  const row = await db.prepare(`INSERT INTO part_requests_pairing_limits(installation_id,window_start_ms,failures,paused_until_ms) VALUES (?1,?2,1,0)
-    ON CONFLICT(installation_id) DO UPDATE SET
-      paused_until_ms=CASE WHEN window_start_ms<=?3 THEN 0 WHEN failures+1>=?4 THEN ?5 ELSE paused_until_ms END,
-      failures=CASE WHEN window_start_ms<=?3 THEN 1 ELSE failures+1 END,
-      window_start_ms=CASE WHEN window_start_ms<=?3 THEN ?2 ELSE window_start_ms END
-    RETURNING paused_until_ms AS pausedUntil`)
-    .bind(installationId, now, now - wrongPinWindowMs, maximumWrongPins, now + pairingPauseMs).first<{ pausedUntil: number }>();
-  return Number(row?.pausedUntil ?? 0);
+/**
+ * Count one wrong PIN for the installation and, when known, for the address. Each counter is one atomic statement, so
+ * parallel guesses cannot all read the same count. Returns when this client is paused until.
+ */
+export async function recordWrongPin(db: Database, now: number, addressHash?: string): Promise<number> {
+  const expired = now - wrongPinWindowMs; const until = now + pairingPauseMs;
+  const counter = (limit: number) => `DO UPDATE SET
+      paused_until_ms=CASE WHEN window_start_ms<=${expired} THEN 0 WHEN failures+1>=${limit} THEN ${until} ELSE paused_until_ms END,
+      failures=CASE WHEN window_start_ms<=${expired} THEN 1 ELSE failures+1 END,
+      window_start_ms=CASE WHEN window_start_ms<=${expired} THEN ${now} ELSE window_start_ms END
+    RETURNING paused_until_ms AS pausedUntil`;
+  const results = await db.batch([
+    db.prepare(`INSERT INTO part_requests_pairing_limits(installation_id,window_start_ms,failures,paused_until_ms) VALUES (?,?,1,0)
+      ON CONFLICT(installation_id) ${counter(maximumWrongPins)}`).bind(installationId, now),
+    ...(addressHash ? [db.prepare(`INSERT INTO part_requests_pairing_address_limits(installation_id,address_hash,window_start_ms,failures,paused_until_ms) VALUES (?,?,?,1,0)
+      ON CONFLICT(installation_id,address_hash) ${counter(maximumWrongPinsPerAddress)}`).bind(installationId, addressHash, now)] : []),
+  ]);
+  return Math.max(...results.map((result) => Number((result.results?.[0] as { pausedUntil?: number } | undefined)?.pausedUntil ?? 0)));
 }
 
-export type AuthenticatedDevice = { readonly deviceId: string; readonly memberId: string; readonly memberName: string; readonly pairedDevices: number };
+export type AuthenticatedDevice = { readonly deviceId: string; readonly deviceLabel: string; readonly memberId: string; readonly memberName: string; readonly pairedDevices: number };
 
 /**
- * The device and member behind a bearer key, or null. The same read checks the key, that the device is not revoked and
- * that the member is on the active roster right now, so leaving the roster ends every device of that member.
+ * The device and member behind a key's hash, or null. The same read checks the key, that the device is not revoked and that
+ * the member is on the active roster right now, so leaving the roster ends every device of that member. The read starts
+ * before this returns, so reads started beside it share one D1 batch.
  */
-export async function authenticateDevice(db: Database, authorization: string | null): Promise<AuthenticatedDevice | null> {
-  const key = bearerDeviceKey(authorization);
-  if (!key) return null;
-  const row = await db.prepare(`SELECT d.id AS deviceId,d.member_id AS memberId,m.first_name AS firstName,m.last_name AS lastName,
+export function readDevice(db: Database, keyHash: string): Promise<AuthenticatedDevice | null> {
+  return db.prepare(`SELECT d.id AS deviceId,d.label AS deviceLabel,d.member_id AS memberId,m.first_name AS firstName,m.last_name AS lastName,
       (SELECT COUNT(*) FROM part_requests_devices o WHERE o.installation_id=d.installation_id AND o.member_id=d.member_id AND o.revoked_ms IS NULL) AS pairedDevices
     FROM part_requests_devices d JOIN members m ON m.installation_id=d.installation_id AND m.id=d.member_id AND m.active=1
-    WHERE d.installation_id=? AND d.key_hash=? AND d.revoked_ms IS NULL`).bind(installationId, await sha256Hex(key)).first<{ deviceId: string; memberId: string; firstName: string; lastName: string; pairedDevices: number }>();
-  return row && { deviceId: row.deviceId, memberId: row.memberId, memberName: `${row.firstName} ${row.lastName}`.trim(), pairedDevices: Number(row.pairedDevices) };
+    WHERE d.installation_id=? AND d.key_hash=? AND d.revoked_ms IS NULL`).bind(installationId, keyHash)
+    .first<{ deviceId: string; deviceLabel: string; memberId: string; firstName: string; lastName: string; pairedDevices: number }>()
+    .then((row) => row && { deviceId: row.deviceId, deviceLabel: row.deviceLabel, memberId: row.memberId, memberName: `${row.firstName} ${row.lastName}`.trim(), pairedDevices: Number(row.pairedDevices) });
+}
+
+/** The hash of the device key in an Authorization header, or undefined when the header cannot hold one. */
+export async function deviceKeyHash(authorization: string | null): Promise<string | undefined> {
+  const key = bearerDeviceKey(authorization);
+  return key ? sha256Hex(key) : undefined;
+}
+
+export async function authenticateDevice(db: Database, authorization: string | null): Promise<AuthenticatedDevice | null> {
+  const keyHash = await deviceKeyHash(authorization);
+  return keyHash ? readDevice(db, keyHash) : null;
 }

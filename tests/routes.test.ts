@@ -1,0 +1,664 @@
+// The routes end to end through their handlers: real migrations on SQLite, Notion stubbed at the fetch boundary.
+import test, { afterEach, beforeEach } from "node:test";
+import assert from "node:assert/strict";
+import { registerHooks } from "node:module";
+import { createHarness, dashboard, discordB, goodDraft, testCredentials, type Harness } from "./helpers/harness.ts";
+import { dataSource, dataSourceId, databaseId, guestPerson, memberPerson, namelessGuest, notionResponse, otherDataSourceId, stubNotion, testToken, type Stub } from "./helpers/notion-stub.ts";
+import { maximumCreates, maximumGeneral, pendingLimitMs, repeatWindowMs } from "../src/requests.ts";
+import { clientAddress, exchangePin, issuePin, maximumWrongPins, maximumWrongPinsPerAddress, pairingPauseMs, workerSubrequestAddress } from "../src/pairing.ts";
+
+const sdk = new URL("./helpers/module-sdk-stub.ts", import.meta.url).href;
+registerHooks({ resolve: (specifier, context, next) => specifier === "@lancerlogin/module-sdk/api" ? { url: sdk, shortCircuit: true } : next(specifier, context) });
+const { default: api } = await import("../src/api.ts") as { default: any };
+
+let stub: Stub;
+let h: Harness;
+beforeEach(() => { stub = stubNotion(); h = createHarness(api); });
+afterEach(() => { stub.restore(); });
+
+const uuid = () => crypto.randomUUID();
+const send = (key: string, submissionId: string, draft: Record<string, unknown> = goodDraft()) => h.call("POST", "/public/part-requests/requests", { key, body: { submissionId, draft } });
+const pageCalls = () => stub.calls.filter((call) => call.url.endsWith("/pages")).length;
+const ready = async () => { await h.connect(); stub.calls.length = 0; return h.pair(); };
+const row = (id: string) => h.test.rows<any>("SELECT * FROM part_requests_submissions WHERE id=?", id)[0];
+
+// ---- Setup, Admin only
+
+test("setup: token, then database, then connection; the site address comes from the dashboard origin", async () => {
+  assert.equal((await h.admin("GET", "/status")).body.problem, "notion_not_connected");
+  const saved = await h.admin("PUT", "/token", { token: testToken });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.body.tokenSaved, true);
+  assert.equal(saved.body.siteAddress, dashboard);
+  assert.equal(saved.body.problem, "notion_not_connected", "a saved token alone is not a connection");
+  const sources = await h.admin("POST", "/database", { databaseUrl: `https://app.notion.com/p/${databaseId.replaceAll("-", "")}` });
+  assert.deepEqual(sources.body, { databaseId, dataSources: [{ id: dataSourceId, name: "Ordering" }] });
+  assert.equal(await api.setup.stepValid(h.db, "notion-connection"), false);
+  const connected = await h.admin("POST", "/connection", { databaseUrl: databaseId, dataSourceId });
+  assert.equal(connected.status, 200);
+  assert.equal(connected.body.problem, null);
+  assert.deepEqual(connected.body.teams.map((team: { name: string }) => team.name), ["Test Team One", "Test Team Two"]);
+  assert.equal(await api.setup.stepValid(h.db, "notion-connection"), true);
+  assert.equal(await api.setup.stepValid(h.db, "something-else"), false);
+});
+
+test("setup's predicate is the same check Core runs inside its own SQL", async () => {
+  const predicate = api.setup.predicates["notion-connection"]("primary");
+  const holds = () => Object.values(h.test.rows(`SELECT (${predicate.sql}) AS ok`, ...predicate.bindings)[0] as object)[0];
+  assert.equal(holds(), 0);
+  await h.connect();
+  assert.equal(holds(), 1);
+  await h.admin("PUT", "/token", { token: testToken });
+  assert.equal(holds(), 0, "a replaced token must be verified against the database again");
+});
+
+test("setup: several data sources need a choice and offer the list", async () => {
+  stub.dataSources = [{ id: dataSourceId, name: "Ordering" }, { id: otherDataSourceId, name: "Archive" }];
+  await h.admin("PUT", "/token", { token: testToken });
+  const refused = await h.admin("POST", "/connection", { databaseUrl: databaseId });
+  assert.equal(refused.status, 409);
+  assert.equal(refused.body.code, "data_source_required");
+  assert.equal(refused.body.dataSources.length, 2);
+  assert.equal((await h.admin("POST", "/connection", { databaseUrl: databaseId, dataSourceId: otherDataSourceId })).status, 200);
+});
+
+test("setup: a schema mismatch is refused, says what is wrong, and leaves the connection unverified", async () => {
+  await h.admin("PUT", "/token", { token: testToken });
+  delete stub.source.properties.SKU;
+  const refused = await h.admin("POST", "/connection", { databaseUrl: databaseId, dataSourceId });
+  assert.equal(refused.status, 422);
+  assert.equal(refused.body.code, "schema_mismatch");
+  assert.match(refused.body.error, /SKU/);
+  assert.equal(await api.setup.stepValid(h.db, "notion-connection"), false);
+});
+
+test("setup: a rejected token is not saved; a bad token, a lookalike link and an unshared database get clear refusals", async () => {
+  stub.on(/^GET \/users\/me$/, () => notionResponse({ code: "unauthorized" }, 401));
+  const rejected = await h.admin("PUT", "/token", { token: "ntn_aDifferentTokenThatNotionRejects000000" });
+  assert.equal(rejected.body.code, "notion_token_rejected");
+  assert.equal(h.test.rows("SELECT * FROM part_requests_notion").length, 0);
+  for (const bad of [{ token: "short" }, { token: "has spaces in it which is not a token" }, { token: 5 }, { token: testToken, extra: 1 }, {}]) assert.equal((await h.admin("PUT", "/token", bad)).body.code, "invalid_token", JSON.stringify(bad));
+  stub = (stub.restore(), stubNotion());
+  await h.admin("PUT", "/token", { token: testToken });
+  assert.equal((await h.admin("POST", "/connection", { databaseUrl: `https://notion.so.evil.example.test/${databaseId.replaceAll("-", "")}` })).body.code, "invalid_link");
+  assert.equal((await h.admin("POST", "/connection", { databaseUrl: "99999999-2222-4333-8444-555555555555" })).body.code, "notion_404");
+});
+
+test("setup: credential encryption being unavailable stops a save", async () => {
+  h = createHarness(api, { credentials: testCredentials(false) });
+  const refused = await h.admin("PUT", "/token", { token: testToken });
+  assert.equal(refused.status, 503);
+  assert.equal(refused.body.code, "credentials_unavailable");
+});
+
+test("Admin only: Operators, signed-out visitors and other origins are refused on every setup and Admin route", async () => {
+  await h.connect();
+  stub.calls.length = 0;
+  const routes = [
+    ["GET", "/module-setup/part-requests/status"], ["PUT", "/module-setup/part-requests/token"], ["DELETE", "/module-setup/part-requests/token"], ["POST", "/module-setup/part-requests/database"], ["POST", "/module-setup/part-requests/connection"],
+    ["GET", "/admin/part-requests/requests"], ["GET", "/admin/part-requests/devices"], ["POST", "/admin/part-requests/devices/revoke"], ["POST", "/admin/part-requests/recipients/refresh"],
+  ] as const;
+  for (const [method, path] of routes) {
+    assert.equal((await h.call(method, path, { role: "operator", origin: dashboard, body: {} })).status, 403, `${method} ${path} as an Operator`);
+    assert.equal((await h.call(method, path, { role: null, origin: dashboard, body: {} })).status, 401, `${method} ${path} signed out`);
+    if (method !== "GET") {
+      assert.equal((await h.call(method, path, { body: {} })).status, 403, `${method} ${path} from no origin`);
+      assert.equal((await h.call(method, path, { origin: "https://evil.example.test", body: {} })).status, 403, `${method} ${path} from another origin`);
+    }
+  }
+  assert.equal(stub.calls.length, 0);
+  assert.equal(h.test.rows("SELECT * FROM part_requests_notion WHERE ciphertext IS NOT NULL").length, 1);
+});
+
+test("the manifest declares the Operator capability Core needs for /admin routes, and the routes it serves", async () => {
+  const { default: manifest } = await import("../src/manifest.ts");
+  assert.ok(manifest.capabilities.some((capability) => capability.operator));
+  assert.equal(manifest.setup.version, 1);
+  assert.deepEqual(Object.keys(api.routes).sort(), manifest.apiRoutes.map((route) => route.path).sort());
+  assert.deepEqual(Object.keys(api.jobs), manifest.jobs.map((job) => job.id));
+  assert.deepEqual(Object.keys(api.setup.predicates), manifest.setup.steps.map((step) => step.id));
+});
+
+// ---- The token never comes back
+
+test("the token never appears in a response, a log line, the database, or an error, on any path", async () => {
+  const lines: string[] = [];
+  const saved = { log: console.log, warn: console.warn, error: console.error, info: console.info, debug: console.debug };
+  for (const name of Object.keys(saved) as (keyof typeof saved)[]) console[name] = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+  const seen: string[] = [];
+  const record = async (work: Promise<{ text: string }>) => { const result = await work; seen.push(result.text); return result; };
+  try {
+    await record(h.admin("PUT", "/token", { token: testToken }));
+    await record(h.admin("POST", "/database", { databaseUrl: databaseId }));
+    await record(h.admin("POST", "/connection", { databaseUrl: databaseId, dataSourceId }));
+    await record(h.admin("GET", "/status"));
+    const key = await h.pair();
+    await h.runJob();
+    await record(h.call("GET", "/public/part-requests/options", { key }));
+    await record(send(key, uuid()));
+    for (const failure of [401, 500]) { stub.on(/^POST \/pages$/, () => notionResponse({ message: `echo ${testToken}` }, failure)); await record(send(key, uuid())); }
+    stub.on(/^POST \/pages$/, () => { throw new Error(`network failure ${testToken}`); });
+    await record(send(key, uuid()));
+    stub.on(/^GET \/data_sources/, () => notionResponse({ message: testToken }, 401));
+    await record(h.admin("POST", "/connection", { databaseUrl: databaseId, dataSourceId }));
+    await record(h.call("GET", "/admin/part-requests/requests"));
+    await record(h.call("GET", "/admin/part-requests/devices"));
+    await h.admin("PUT", "/token", { token: "bad token with spaces" });
+    await h.runJob();
+  } finally { Object.assign(console, saved); }
+  assert.ok(seen.length >= 10);
+  for (const text of [...seen, ...lines]) { assert.ok(!text.includes(testToken), text.slice(0, 200)); assert.ok(!text.includes("ciphertext"), text.slice(0, 200)); }
+  const stored = JSON.stringify(h.test.sqlite.prepare("SELECT * FROM part_requests_notion").all()) + JSON.stringify(h.test.rows("SELECT * FROM part_requests_submissions")) + JSON.stringify(h.test.rows("SELECT * FROM part_requests_recipient_refresh"));
+  assert.ok(!stored.includes(testToken));
+  assert.ok(stub.calls.some((call) => call.headers.Authorization === `Bearer ${testToken}`), "it does reach Notion, in the header");
+});
+
+// ---- Device API
+
+test("options: teams, recipients and the member's default, only for a paired device", async () => {
+  const key = await ready();
+  await h.runJob();
+  const options = await h.call("GET", "/public/part-requests/options", { key });
+  assert.equal(options.status, 200);
+  assert.deepEqual(options.body.teams, [{ id: "team-1", name: "Test Team One" }, { id: "team-2", name: "Test Team Two" }]);
+  assert.deepEqual(options.body.recipients.map((person: { name: string }) => person.name), ["Test Guest", "Test Guest Looked Up", "Test Member"]);
+  assert.equal(options.body.defaultRecipientId, null);
+  assert.deepEqual(options.body.statuses, ["NORMAL Request", "Incomplete Request"]);
+  assert.equal(options.body.vendors.length, 20);
+  assert.equal(options.text.includes("student.a@example.test"), false);
+  for (const init of [{}, { key: "x".repeat(43) }]) assert.equal((await h.call("GET", "/public/part-requests/options", init)).body.code, "pair_again");
+});
+
+test("a member's chosen person becomes their default, only for themselves, and must be on the list", async () => {
+  const key = await ready();
+  await h.runJob();
+  const choose = (id: unknown, device = key) => h.call("POST", "/public/part-requests/recipient", { key: device, body: { notionUserId: id } });
+  assert.equal((await choose("not-on-the-list")).status, 400);
+  assert.equal((await choose(guestPerson)).body.defaultRecipientId, guestPerson);
+  assert.equal((await h.call("GET", "/public/part-requests/options", { key })).body.defaultRecipientId, guestPerson);
+  assert.equal((await choose(memberPerson)).body.defaultRecipientId, memberPerson, "it can be changed");
+  const other = await h.pair(discordB);
+  assert.equal((await h.call("GET", "/public/part-requests/options", { key: other })).body.defaultRecipientId, null);
+  assert.equal((await choose(null)).body.defaultRecipientId, null);
+  assert.equal((await h.call("GET", "/public/part-requests/options", { key })).body.defaultRecipientId, null);
+});
+
+test("create: a good request reaches Notion once, with properties only, and the log shows who sent it from which device", async () => {
+  await h.connect();
+  await h.runJob();
+  stub.calls.length = 0;
+  const key = await h.pair(undefined, "Test laptop");
+  const id = uuid();
+  const created = await send(key, id, goodDraft({ recipient: guestPerson }));
+  assert.equal(created.status, 201);
+  assert.deepEqual(created.body, { submissionId: id, state: "created", pageUrl: "https://app.notion.com/p/created-request", repeats: [] });
+  const sent = stub.calls.find((call) => call.url.endsWith("/pages"))!;
+  assert.deepEqual(Object.keys(sent.body).sort(), ["parent", "properties"]);
+  assert.equal(sent.body.parent.data_source_id, dataSourceId);
+  const log = await h.call("GET", "/admin/part-requests/requests");
+  assert.equal(log.body.requests[0].memberName, "Test Student A");
+  assert.equal(log.body.requests[0].deviceLabel, "Test laptop");
+  assert.equal(log.body.requests[0].vendor, "REV");
+  assert.equal(log.body.requests[0].recipient, "Test Guest");
+  assert.equal(log.body.requests[0].team, "Test Team One");
+  assert.equal(log.body.requests[0].state, "created");
+});
+
+test("create: strict validation refuses bad requests before anything is recorded or sent", async () => {
+  const key = await ready();
+  const refusals: [string, unknown][] = [
+    ["unsupported vendor", goodDraft({ url: "https://example.test/product" })],
+    ["lookalike vendor", goodDraft({ url: "https://www.mcmaster.com.evil.example.test/1" })],
+    ["team not in Notion", goodDraft({ team: "team-unknown" })],
+    ["status not offered", goodDraft({ status: "RUSH Request" })],
+    ["recipient not on the list", goodDraft({ recipient: "c0000000-0000-4000-8000-0000000000ff" })],
+    ["quantity zero", goodDraft({ quantity: 0 })],
+    ["unconfirmed currency", goodDraft({ currencyConfirmed: false })],
+    ["unknown field", { ...goodDraft(), vendor: "REV" }],
+    ["wrong type", goodDraft({ quantity: "2" })],
+    ["missing", undefined],
+  ];
+  for (const [label, draft] of refusals) {
+    const result = await h.call("POST", "/public/part-requests/requests", { key, body: { submissionId: uuid(), draft } });
+    assert.equal(result.status, 400, label);
+    assert.equal(result.body.code, "validation", label);
+  }
+  for (const submissionId of ["short", "", 5, undefined, "AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE"]) assert.equal((await h.call("POST", "/public/part-requests/requests", { key, body: { submissionId, draft: goodDraft() } })).status, 400, String(submissionId));
+  assert.equal(h.test.rows("SELECT * FROM part_requests_submissions").length, 0);
+  assert.equal(pageCalls(), 0);
+});
+
+test("create: an Incomplete request needs only a description and a supported URL", async () => {
+  const key = await ready();
+  const result = await send(key, uuid(), goodDraft({ status: "Incomplete Request", team: "", recipient: "", quantity: null, price: null, sku: "", currencyConfirmed: false }));
+  assert.equal(result.status, 201);
+  const properties = stub.calls.find((call) => call.url.endsWith("/pages"))!.body.properties;
+  assert.deepEqual(Object.keys(properties).sort(), ["st%40t", "title", "urll", "v3nd"].sort());
+});
+
+// ---- Duplicate protection
+
+test("duplicate IDs racing in parallel create one page, and the others do not call Notion", async () => {
+  const key = await ready();
+  const id = uuid();
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  stub.on(/^POST \/pages$/, async () => { await held; return notionResponse({ url: "https://www.notion.so/one" }); });
+  const racing = Array.from({ length: 12 }, () => send(key, id));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(pageCalls(), 1);
+  assert.equal(row(id).state, "pending", "recorded before Notion answers");
+  release();
+  const results = await Promise.all(racing);
+  assert.equal(pageCalls(), 1);
+  assert.equal(results.filter((result) => result.status === 201).length, 1);
+  assert.equal(results.filter((result) => result.status === 202 && result.body.state === "pending").length, 11);
+  const after = await send(key, id);
+  assert.equal(after.status, 200);
+  assert.deepEqual(after.body, { submissionId: id, state: "created", pageUrl: "https://www.notion.so/one", replayed: true });
+  assert.equal(pageCalls(), 1);
+});
+
+test("the ID is recorded before Notion is called, and if recording fails Notion is not called", async () => {
+  const key = await ready();
+  const id = uuid();
+  stub.on(/^POST \/pages$/, () => { assert.equal(row(id).state, "pending"); return notionResponse({ url: "https://www.notion.so/one" }); });
+  assert.equal((await send(key, id)).status, 201);
+  h.state.failing = /INSERT INTO part_requests_submissions/;
+  await assert.rejects(send(key, uuid()), /D1_ERROR/);
+  h.state.failing = undefined;
+  assert.equal(pageCalls(), 1);
+});
+
+test("uncertain results are recorded, returned on repeats, and never sent again", async () => {
+  const key = await ready();
+  for (const [label, answer] of [["5xx", () => notionResponse({}, 500)], ["409", () => notionResponse({}, 409)], ["timeout", () => { throw new DOMException("timed out", "TimeoutError"); }], ["unreadable", () => new Response("{bad")], ["bad link", () => notionResponse({ url: "https://notion.so.evil.example.test/x" })]] as const) {
+    stub = (stub.restore(), stubNotion());
+    stub.on(/^POST \/pages$/, answer);
+    const id = uuid();
+    const first = await send(key, id);
+    assert.equal(first.status, 202, label);
+    assert.equal(first.body.state, "uncertain", label);
+    assert.equal(row(id).state, "uncertain", label);
+    assert.equal((await send(key, id)).body.state, "uncertain", label);
+    assert.equal((await h.call("GET", `/public/part-requests/requests/${id}`, { key })).body.state, "uncertain", label);
+    assert.equal(pageCalls(), 1, label);
+  }
+});
+
+test("a certain failure is recorded as failed, repeats return it, and a new ID can try again", async () => {
+  const key = await ready();
+  stub.on(/^POST \/pages$/, () => notionResponse({}, 429, { "retry-after": "7" }));
+  const id = uuid();
+  const failed = await send(key, id);
+  assert.equal(failed.status, 502);
+  assert.equal(failed.body.state, "failed");
+  assert.equal(failed.body.code, "notion_429");
+  assert.equal(failed.body.retryAfterSeconds, 7);
+  assert.equal((await send(key, id)).body.state, "failed");
+  assert.equal(pageCalls(), 1);
+  stub = (stub.restore(), stubNotion());
+  assert.equal((await send(key, uuid())).status, 201);
+});
+
+test("a Worker that stopped mid-request leaves a pending row, which turns uncertain and is not sent", async () => {
+  const key = await ready();
+  const id = uuid();
+  assert.equal((await send(key, id)).status, 201);
+  h.test.run("UPDATE part_requests_submissions SET state='pending',page_url=NULL,finished_ms=NULL WHERE id=?", id);
+  stub.calls.length = 0;
+  assert.equal((await send(key, id)).body.state, "pending");
+  h.test.run("UPDATE part_requests_submissions SET created_ms=created_ms-? WHERE id=?", pendingLimitMs, id);
+  assert.equal((await send(key, id)).body.state, "uncertain");
+  assert.equal((await h.call("GET", "/admin/part-requests/requests")).body.requests[0].state, "uncertain");
+  assert.equal(pageCalls(), 0);
+});
+
+test("if the result cannot be saved after Notion created the page, the student still gets the link and no resend is possible", async () => {
+  const key = await ready();
+  const id = uuid();
+  h.state.failing = /UPDATE part_requests_submissions/;
+  assert.equal((await send(key, id)).status, 201);
+  h.state.failing = undefined;
+  assert.equal(row(id).state, "pending");
+  assert.equal((await send(key, id)).status, 202);
+  assert.equal(pageCalls(), 1);
+});
+
+test("an ID reused with different content, or by another member, is refused and tells them nothing", async () => {
+  const key = await ready();
+  const other = await h.pair(discordB);
+  const id = uuid();
+  await send(key, id);
+  assert.equal((await send(key, id, goodDraft({ quantity: 3 }))).body.code, "submission_conflict");
+  assert.equal((await send(other, id)).body.code, "submission_conflict");
+  assert.equal((await h.call("GET", `/public/part-requests/requests/${id}`, { key: other })).status, 404);
+  assert.equal(pageCalls(), 1);
+});
+
+// ---- Device and roster state
+
+test("a revoked device and a member off the roster are refused on every device route, with a prompt to pair again", async () => {
+  const key = await ready();
+  const other = await h.pair(discordB);
+  const routes = (device: string) => [
+    h.call("GET", "/public/part-requests/options", { key: device }), send(device, uuid()),
+    h.call("POST", "/public/part-requests/check", { key: device, body: { url: goodDraft().url } }),
+    h.call("POST", "/public/part-requests/recipient", { key: device, body: { notionUserId: null } }),
+    h.call("GET", `/public/part-requests/requests/${uuid()}`, { key: device }),
+  ];
+  const deviceId = h.test.rows<{ id: string }>("SELECT id FROM part_requests_devices WHERE member_id='m-a'")[0]!.id;
+  assert.equal((await h.call("POST", "/admin/part-requests/devices/revoke", { origin: dashboard, body: { deviceId } })).status, 200);
+  for (const result of await Promise.all(routes(key))) { assert.equal(result.status, 401); assert.equal(result.body.code, "pair_again"); }
+  assert.equal((await h.call("POST", "/admin/part-requests/devices/revoke", { origin: dashboard, body: { deviceId } })).status, 404, "already revoked");
+  h.test.run("UPDATE members SET active=0 WHERE id='m-b'");
+  for (const result of await Promise.all(routes(other))) { assert.equal(result.status, 401); assert.equal(result.body.code, "pair_again"); }
+  assert.equal(pageCalls(), 0);
+  h.test.run("UPDATE members SET active=1 WHERE id='m-b'");
+  assert.equal((await h.call("GET", "/public/part-requests/options", { key: other })).status, 200, "rejoining the roster restores it");
+});
+
+test("revocation between the first read and recording the ID stops the request before Notion", async () => {
+  const key = await ready();
+  const realBatch = h.db.batch.bind(h.db);
+  let done = false;
+  h.db.batch = async (statements) => {
+    if (!done) { done = true; h.test.run("UPDATE part_requests_devices SET revoked_ms=1"); }
+    return realBatch(statements);
+  };
+  const id = uuid();
+  assert.equal((await send(key, id)).status, 401);
+  assert.equal(pageCalls(), 0);
+  assert.equal(row(id), undefined);
+});
+
+test("removing a member from the roster keeps their log entries, by name", async () => {
+  const key = await ready();
+  await send(key, uuid());
+  h.test.run("DELETE FROM members WHERE id='m-a'");
+  const log = await h.call("GET", "/admin/part-requests/requests");
+  assert.equal(log.body.requests[0].memberName, "Test Student A");
+  assert.equal(h.test.rows("SELECT * FROM part_requests_devices").length, 0);
+});
+
+test("a connection that is missing, replaced or out of step stops requests with a clear 503, but recorded results still answer", async () => {
+  const key = await ready();
+  const id = uuid();
+  await send(key, id);
+  await h.admin("PUT", "/token", { token: testToken });
+  const unverified = await send(key, uuid());
+  assert.equal(unverified.status, 503);
+  assert.equal(unverified.body.code, "notion_not_connected");
+  assert.equal((await send(key, id)).body.state, "created");
+  assert.equal((await h.call("GET", "/public/part-requests/options", { key })).body.code, "notion_not_connected");
+  await h.connect();
+  stub.calls.length = 0;
+  delete stub.source.properties.Qty;
+  await h.runJob();
+  const changed = await send(key, uuid());
+  assert.equal(changed.body.code, "notion_schema_changed");
+  assert.equal(pageCalls(), 0);
+  assert.match((await h.admin("GET", "/status")).body.schemaError, /Qty/);
+  stub.source = dataSource();
+  await h.admin("POST", "/connection", { databaseUrl: databaseId, dataSourceId });
+  assert.equal((await send(key, uuid())).status, 201);
+});
+
+test("after a restore (no connection row, setup still marked done) requests stop and the Admin can reconnect", async () => {
+  const key = await ready();
+  h.test.run("DELETE FROM part_requests_notion");
+  assert.equal((await send(key, uuid())).body.code, "notion_not_connected");
+  assert.equal((await h.admin("POST", "/connection", { databaseUrl: databaseId })).body.code, "notion_not_connected");
+  assert.equal(await api.setup.stepValid(h.db, "notion-connection"), false);
+  await h.connect();
+  assert.equal((await send(key, uuid())).status, 201);
+});
+
+// ---- Repeat warning
+
+test("repeat warning: same product by anyone within 7 days warns without blocking; older or failed ones do not count", async () => {
+  const key = await ready();
+  const other = await h.pair(discordB);
+  const check = (body: unknown, device = other) => h.call("POST", "/public/part-requests/check", { key: device, body });
+  assert.deepEqual((await check({ url: goodDraft().url, sku: goodDraft().sku })).body.repeats, []);
+  const firstId = uuid();
+  await send(key, firstId);
+  const warned = await check({ url: "https://revrobotics.com/rev-41-1600?ref=x" });
+  assert.equal(warned.body.repeats.length, 1);
+  assert.equal(warned.body.repeats[0].memberName, "Test Student A");
+  assert.equal(warned.body.repeats[0].pageUrl, "https://app.notion.com/p/created-request");
+  assert.equal((await check({ url: "https://www.revrobotics.com/another-address/", sku: "rev-41-1600" })).body.repeats.length, 1, "matched by SKU");
+  assert.equal((await check({ url: "https://www.revrobotics.com/something-else/", sku: "OTHER" })).body.repeats.length, 0);
+  assert.equal((await check({ url: "https://andymark.com/rev-41-1600", sku: "REV-41-1600" })).body.repeats.length, 0, "SKUs belong to a store");
+
+  const second = await send(other, uuid(), goodDraft({ quantity: 5 }));
+  assert.equal(second.status, 201, "not blocked");
+  assert.equal(second.body.repeats.length, 1);
+  assert.equal(pageCalls(), 2);
+
+  h.test.run("UPDATE part_requests_submissions SET created_ms=created_ms-?", repeatWindowMs + 1);
+  assert.equal((await check({ url: goodDraft().url })).body.repeats.length, 0, "past seven days");
+  stub.on(/^POST \/pages$/, () => notionResponse({}, 400));
+  await send(key, uuid());
+  assert.equal((await check({ url: goodDraft().url })).body.repeats.length, 0, "a failed request created nothing");
+  assert.equal((await check({ url: "https://example.test/x" })).status, 400);
+});
+
+// ---- Rate limits
+
+test("rate limits: per device, counted before Notion, with Retry-After; other devices and replays are unaffected", async () => {
+  const key = await ready();
+  const other = await h.pair(discordB);
+  const firstId = uuid();
+  await send(key, firstId);
+  for (let index = 1; index < maximumCreates; index++) assert.equal((await send(key, uuid())).status, 201, `request ${index}`);
+  const calls = pageCalls();
+  const limitedId = uuid();
+  const limited = await send(key, limitedId);
+  assert.equal(limited.status, 429);
+  assert.equal(limited.body.code, "rate_limited");
+  assert.ok(limited.body.retryAfterSeconds > 0 && limited.body.retryAfterSeconds <= 600);
+  assert.equal(limited.headers.get("retry-after"), String(limited.body.retryAfterSeconds));
+  assert.equal(row(limitedId), undefined, "a refused ID stays free for the retry");
+  assert.equal(pageCalls(), calls);
+  assert.equal((await send(key, firstId)).status, 200, "a recorded result is still returned");
+  assert.equal((await send(other, uuid())).status, 201, "another device has its own count");
+  h.test.run("UPDATE part_requests_device_limits SET window_start_ms=window_start_ms-600000");
+  assert.equal((await send(key, limitedId)).status, 201, "the same ID succeeds after the window");
+});
+
+test("rate limits: repeat checks and choosing a person have their own, higher limit", async () => {
+  const key = await ready();
+  const check = () => h.call("POST", "/public/part-requests/check", { key, body: { url: goodDraft().url } });
+  for (let index = 0; index < maximumGeneral; index++) assert.equal((await check()).status, 200, `check ${index}`);
+  assert.equal((await check()).status, 429);
+  assert.equal((await send(key, uuid())).status, 201, "does not use up the create limit");
+});
+
+// ---- Pairing guesses
+
+const pairRoute = (pin: string, headers: Record<string, string> = {}, deviceLabel?: string) => h.call("POST", "/public/part-requests/pair", { body: { pin, deviceLabel }, headers });
+
+test("client addresses: only a real one counts; a Worker subrequest's fixed address and a missing header do not", () => {
+  const get = (values: Record<string, string>) => ({ get: (name: string) => values[name] ?? null });
+  assert.equal(clientAddress(get({ "cf-connecting-ip": " 203.0.113.9 " })), "203.0.113.9");
+  assert.equal(clientAddress(get({})), undefined);
+  assert.equal(clientAddress(get({ "cf-connecting-ip": workerSubrequestAddress })), undefined);
+  assert.equal(clientAddress(get({ "cf-connecting-ip": workerSubrequestAddress.toUpperCase() })), undefined);
+  assert.equal(clientAddress(get({ "cf-connecting-ip": "203.0.113.9", "cf-worker": "example.test" })), undefined);
+});
+
+test("pairing guesses: one address is paused on its own, and everyone else can still pair; only a hash is stored", async () => {
+  await h.connect();
+  const attacker = { "cf-connecting-ip": "203.0.113.9" };
+  const student = { "cf-connecting-ip": "203.0.113.10" };
+  for (let index = 1; index < maximumWrongPinsPerAddress; index++) assert.equal((await pairRoute("2222-2222", attacker)).status, 401, `guess ${index}`);
+  const paused = await pairRoute("2222-2222", attacker);
+  assert.equal(paused.status, 429);
+  assert.equal(paused.body.code, "pairing_paused");
+  assert.equal(paused.headers.get("retry-after"), String(pairingPauseMs / 1000));
+  const reply = await issuePin(h.db, discordB, Date.now());
+  const pin = /\*\*(.+)\*\*/.exec(reply)![1]!;
+  assert.equal((await pairRoute(pin, attacker)).status, 429, "even a right PIN from the paused address");
+  const paired = await pairRoute(pin, student, "Test laptop");
+  assert.equal(paired.status, 201);
+  assert.equal(h.test.rows<{ label: string }>("SELECT label FROM part_requests_devices")[0]!.label, "Test laptop");
+  const stored = JSON.stringify(h.test.rows("SELECT * FROM part_requests_pairing_address_limits"));
+  assert.ok(!stored.includes("203.0.113"));
+  assert.equal((await h.admin("GET", "/status")).body.pairingAddressesCounted, 1);
+});
+
+test("pairing guesses: with no usable address, only the higher shared limit applies, and it pauses everyone", async () => {
+  await h.connect();
+  const proxied = { "cf-connecting-ip": workerSubrequestAddress };
+  const now = Date.now();
+  for (let index = 1; index < maximumWrongPins; index++) assert.equal((await exchangePin(h.db, "2222-2222", now + index, { address: clientAddress({ get: (name) => (proxied as Record<string, string>)[name] ?? null }) })).status, 401, `guess ${index}`);
+  assert.equal((await exchangePin(h.db, "2222-2222", now + maximumWrongPins)).status, 429);
+  assert.equal(h.test.rows("SELECT * FROM part_requests_pairing_address_limits").length, 0);
+  assert.equal((await h.admin("GET", "/status")).body.pairingAddressesCounted, 0);
+});
+
+test("pairing guesses: many addresses together still reach the shared backstop", async () => {
+  await h.connect();
+  const now = Date.now();
+  for (let index = 1; index < maximumWrongPins; index++) assert.equal((await exchangePin(h.db, "2222-2222", now + index, { address: `198.51.100.${index}` })).status, 401);
+  assert.equal((await exchangePin(h.db, "2222-2222", now + maximumWrongPins, { address: "198.51.100.250" })).status, 429);
+  assert.equal((await exchangePin(h.db, "2222-2222", now + maximumWrongPins + 1, { address: "198.51.100.251" })).status, 429);
+});
+
+test("device labels are cleaned up and default sensibly", async () => {
+  await h.connect();
+  for (const [label, expected] of [["  Test   laptop\n", "Test laptop"], ["", "Browser extension"], [undefined, "Browser extension"], [5, "Browser extension"], ["x".repeat(100), "x".repeat(60)]] as const) {
+    h.test.run("DELETE FROM part_requests_devices");
+    const reply = await issuePin(h.db, discordB, Date.now());
+    const result = await exchangePin(h.db, /\*\*(.+)\*\*/.exec(reply)![1]!, Date.now(), { label });
+    assert.equal(result.status, 201);
+    assert.equal(h.test.rows<{ label: string }>("SELECT label FROM part_requests_devices")[0]!.label, expected);
+  }
+});
+
+// ---- Recipient job
+
+test("the job reads the schema, members, requests across pages and missing names, one Notion call per slice", async () => {
+  await h.connect();
+  stub.calls.length = 0;
+  const outcomes = await h.runJob(true);
+  assert.deepEqual(outcomes.at(-1), { done: true });
+  // Schema, users, two pages of requests, one name, then a slice that finds nothing left.
+  assert.equal(stub.calls.length, 5);
+  assert.equal(outcomes.length, 6);
+  assert.ok(outcomes.slice(0, -1).every((outcome) => outcome.more === true && typeof outcome.cursor === "string"));
+  const people = h.test.rows<{ notion_user_id: string; name: string }>("SELECT notion_user_id,name FROM part_requests_recipients ORDER BY name");
+  assert.deepEqual(people.map((person) => person.name), ["Test Guest", "Test Guest Looked Up", "Test Member"]);
+  assert.ok(people.some((person) => person.notion_user_id === namelessGuest));
+  assert.ok(!stub.calls.some((call) => /filter_properties/.test(call.url) || call.body?.filter_properties));
+  const refresh = (await h.admin("GET", "/status")).body.refresh;
+  assert.equal(refresh.step, "idle");
+  assert.ok(refresh.finishedMs);
+});
+
+test("the job is cheap when it is not due, because every module write pokes it", async () => {
+  await h.connect();
+  await h.runJob();
+  stub.calls.length = 0;
+  h.state.queries = 0;
+  assert.deepEqual(await api.jobs["part-requests.recipients"]({ db: h.db, services: { credentials: h.credentials }, scheduler: { steps: true } }), { skipped: "not due" });
+  assert.equal(stub.calls.length, 0);
+  assert.equal(h.state.queries, 1);
+  assert.equal((await h.call("POST", "/admin/part-requests/recipients/refresh", { origin: dashboard })).status, 202);
+  await h.runJob();
+  assert.ok(stub.calls.length >= 4, "an Admin can ask for a refresh");
+});
+
+test("the job stays within the per-slice query budget", async () => {
+  await h.connect();
+  let most = 0;
+  for (let run = 0; run < 20; run++) {
+    h.state.queries = 0;
+    const outcome = await api.jobs["part-requests.recipients"]({ db: h.db, services: { credentials: h.credentials }, scheduler: { steps: true } }) as { more?: boolean };
+    most = Math.max(most, h.state.queries);
+    if (!outcome.more) break;
+  }
+  assert.ok(most <= 4, `a slice used ${most} queries`);
+});
+
+test("the job under Core's cron fallback does several steps per run and finishes over several runs", async () => {
+  await h.connect();
+  stub.calls.length = 0;
+  const outcomes = await h.runJob(false);
+  assert.deepEqual(outcomes.at(-1), { done: true });
+  assert.equal(h.test.rows("SELECT * FROM part_requests_recipients").length, 3);
+});
+
+test("a job failure records only a code, waits rather than repeating, and keeps earlier people", async () => {
+  await h.connect();
+  await h.runJob();
+  await h.call("POST", "/admin/part-requests/recipients/refresh", { origin: dashboard });
+  stub.on(/^GET \/users\?/, () => notionResponse({ message: `token ${testToken}` }, 429));
+  stub.calls.length = 0;
+  const outcomes = await h.runJob();
+  assert.deepEqual(outcomes.at(-1), { failed: "notion_429" });
+  assert.equal((await h.admin("GET", "/status")).body.refresh.lastError, "notion_429");
+  assert.equal(h.test.rows("SELECT * FROM part_requests_recipients").length, 3);
+  stub.calls.length = 0;
+  assert.deepEqual(await api.jobs["part-requests.recipients"]({ db: h.db, services: { credentials: h.credentials }, scheduler: { steps: true } }), { skipped: "not due" });
+  assert.equal(stub.calls.length, 0);
+});
+
+test("a failed name lookup keeps the person, shown as unnamed, and is not repeated", async () => {
+  const key = await ready();
+  stub.on(new RegExp(`^GET /users/${namelessGuest}$`), () => notionResponse({}, 404));
+  await h.runJob();
+  const options = await h.call("GET", "/public/part-requests/options", { key });
+  assert.ok(options.body.recipients.some((person: { id: string; name: string }) => person.id === namelessGuest && person.name === "Unnamed Notion user"));
+  assert.equal(stub.calls.filter((call) => call.url.endsWith(namelessGuest)).length, 1);
+});
+
+test("the job does nothing until connected, and prunes old counters and people after a run", async () => {
+  assert.deepEqual(await api.jobs["part-requests.recipients"]({ db: h.db, services: { credentials: h.credentials } }), { skipped: "not connected" });
+  assert.equal(stub.calls.length, 0);
+  await h.connect();
+  const old = Date.now() - 100 * 24 * 60 * 60_000;
+  h.test.run("INSERT INTO part_requests_device_limits VALUES ('primary','d-old','create',?,1)", old);
+  h.test.run("INSERT INTO part_requests_pairing_address_limits VALUES ('primary',?,?,1,0)", "a".repeat(64), old);
+  h.test.run("INSERT INTO part_requests_recipients(installation_id,notion_user_id,name,last_seen_ms) VALUES ('primary','gone','Test Gone',?)", old);
+  await h.runJob();
+  assert.equal(h.test.rows("SELECT * FROM part_requests_device_limits").length, 0);
+  assert.equal(h.test.rows("SELECT * FROM part_requests_pairing_address_limits").length, 0);
+  assert.equal(h.test.rows("SELECT * FROM part_requests_recipients WHERE notion_user_id='gone'").length, 0);
+});
+
+// ---- Admin data and cost
+
+test("Admin data: the log pages newest first; devices show labels and no key material", async () => {
+  await h.connect();
+  stub.calls.length = 0;
+  const key = await h.pair(undefined, "Test laptop");
+  for (let index = 0; index < 3; index++) { await send(key, uuid(), goodDraft({ description: `Test part ${index}` })); h.test.run("UPDATE part_requests_submissions SET created_ms=created_ms-? WHERE description=?", (3 - index) * 1000, `Test part ${index}`); }
+  const page = await h.call("GET", "/admin/part-requests/requests?limit=2");
+  assert.deepEqual(page.body.requests.map((request: { description: string }) => request.description), ["Test part 2", "Test part 1"]);
+  const next = await h.call("GET", `/admin/part-requests/requests?limit=2&before=${page.body.nextBefore}`);
+  assert.deepEqual(next.body.requests.map((request: { description: string }) => request.description), ["Test part 0"]);
+  assert.equal(next.body.nextBefore, null);
+  const devices = await h.call("GET", "/admin/part-requests/devices");
+  assert.equal(devices.body.devices[0].label, "Test laptop");
+  assert.equal(devices.body.devices[0].memberName, "Test Student A");
+  assert.equal(devices.body.devices[0].memberActive, true);
+  assert.ok(devices.body.devices[0].lastUsedMs);
+  assert.ok(!/key_hash|keyHash/.test(devices.text));
+  assert.ok(!h.test.rows<{ key_hash: string }>("SELECT key_hash FROM part_requests_devices").some((row) => devices.text.includes(row.key_hash)));
+  assert.ok(h.test.rows<{ action: string }>("SELECT action FROM audit_log").some((row) => row.action === "part_requests.connection_verified"));
+});
+
+test("query counts: the routes stay small enough for Workers Free", async () => {
+  await h.connect();
+  await h.runJob();
+  const key = await h.pair();
+  const id = uuid();
+  const measure = async (work: () => Promise<{ status: number }>, status: number) => { h.state.queries = 0; assert.equal((await work()).status, status); return h.state.queries; };
+  assert.equal(await measure(() => send(key, id, goodDraft({ recipient: guestPerson })), 201), 3, "create: reads, record, result");
+  assert.equal(await measure(() => send(key, id, goodDraft({ recipient: guestPerson })), 200), 1, "repeat: reads only");
+  assert.equal(await measure(() => send(key, uuid(), goodDraft({ team: "team-unknown" })), 400), 1, "refused: reads only");
+  assert.equal(await measure(() => h.call("GET", "/public/part-requests/options", { key }), 200), 2);
+  assert.equal(await measure(() => h.call("POST", "/public/part-requests/check", { key, body: { url: goodDraft().url } }), 200), 3);
+});

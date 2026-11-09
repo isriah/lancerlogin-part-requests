@@ -2,5 +2,9 @@
   {
     "name": "0001_create_pairing_tables.sql",
     "sha256": "d6b427311d571762e3d304d27f161a8f8bd69a866760a86b6ce7d33cf165ac38"
+  },
+  {
+    "name": "0002_notion_and_requests.sql",
+    "sha256": "5a424b5e51f0280d8f84ffb23d8d59140188e058c6eb5193c37257fbf86b31fd"
   }
 ]

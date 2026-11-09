@@ -24,8 +24,12 @@ test("package.json, the manifest and plugin-release.json agree", () => {
   assert.match(release.core.commit, /^[0-9a-f]{40}$/);
 });
 
-test("the only route is the public family, and there are no pages yet", () => {
-  assert.deepEqual(manifest.apiRoutes, [{ path: "/public/part-requests", match: "prefix", access: "service" }]);
+test("the route families are declared, and there are no pages yet", () => {
+  assert.deepEqual(manifest.apiRoutes, [
+    { path: "/public/part-requests", match: "prefix", access: "service" },
+    { path: "/admin/part-requests", match: "prefix", access: "workspace" },
+    { path: "/module-setup/part-requests", match: "prefix", access: "setup" },
+  ]);
   assert.deepEqual(manifest.navigation, []);
   assert.deepEqual(manifest.settings, []);
   assert.equal(pkg.lancerlogin.entries.dashboard, undefined);
@@ -42,11 +46,11 @@ test("every table is prefixed, declared and classified for backup and cleanup", 
     assert.ok(portable !== nonPortable, `${table} is either backed up or non-portable`);
     assert.ok((manifest.lifecycle.cleanupTargets as readonly string[]).includes(table), `${table} is cleaned up`);
   }
-  for (const secret of ["part_requests_pairing_pins", "part_requests_devices"]) assert.ok((manifest.backup.nonPortableTables as readonly string[]).includes(secret));
+  for (const secret of ["part_requests_pairing_pins", "part_requests_devices", "part_requests_notion", "part_requests_submissions", "part_requests_recipients"]) assert.ok((manifest.backup.nonPortableTables as readonly string[]).includes(secret));
 });
 
-test("PINs and device keys have no plaintext column", () => {
-  const sql = read("migrations/0001_create_pairing_tables.sql");
+test("PINs, device keys and the Notion token have no plaintext column", () => {
+  const sql = read("migrations/0001_create_pairing_tables.sql") + read("migrations/0002_notion_and_requests.sql");
   assert.match(sql, /pin_hash TEXT NOT NULL/);
   assert.match(sql, /key_hash TEXT NOT NULL/);
   assert.doesNotMatch(sql, /^\s*(pin|device_key|key|token)\s+TEXT/m);

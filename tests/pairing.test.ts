@@ -23,6 +23,7 @@ function setup(): { db: TestDatabase; d1: Database } {
   db.run("INSERT INTO members(id,installation_id,external_id,first_name,last_name,email,discord_user_id) VALUES ('m-b','primary','9002','Test Student','B','student.b@example.test',?)", discordB);
   db.run("INSERT INTO members(id,installation_id,external_id,first_name,last_name,email,discord_user_id) VALUES ('m-c','primary','9003','Test Student','C','student.c@example.test',NULL)");
   db.run("INSERT INTO part_requests_settings(installation_id,site_address,updated_ms) VALUES ('primary','https://site.example.test',?)", start);
+  db.run("INSERT INTO part_requests_notion(installation_id,ciphertext,iv,address_salt,schema_json,verified_ms,updated_ms) VALUES ('primary','c','i',?,'{}',?,?)", "0".repeat(64), start, start);
   return { db, d1: db as unknown as Database };
 }
 const command = (d1: Database, discordId: string | undefined, now = start, viaUser = false) =>
@@ -182,7 +183,7 @@ test("deleting a member removes their devices and PINs", async () => {
   assert.equal(db.rows("SELECT * FROM part_requests_pairing_pins").length, 0);
 });
 
-test("repeated wrong PINs pause pairing, even for a correct PIN, without affecting paired devices", async () => {
+test("repeated wrong PINs reach the shared backstop and pause pairing, even for a correct PIN, without affecting paired devices", async () => {
   const { d1 } = setup();
   const key = await pair(d1);
   const good = pinIn(await command(d1, discordB, start));
@@ -199,9 +200,9 @@ test("repeated wrong PINs pause pairing, even for a correct PIN, without affecti
 
 test("wrong PINs spread beyond the window do not pause pairing, and typing mistakes do not count", async () => {
   const { db, d1 } = setup();
-  for (let index = 0; index < maximumWrongPins * 2; index++) assert.equal((await exchangePin(d1, "2222-2222", start + index * (wrongPinWindowMs / 10))).status, 401, `attempt ${index}`);
+  for (let index = 0; index < maximumWrongPins * 2; index++) assert.equal((await exchangePin(d1, "2222-2222", start + index * (wrongPinWindowMs / 100))).status, 401, `attempt ${index}`);
   const failures = db.rows<{ failures: number }>("SELECT failures FROM part_requests_pairing_limits")[0]!.failures;
-  for (let index = 0; index < maximumWrongPins * 2; index++) assert.equal((await exchangePin(d1, "short", start + maximumWrongPins * 3 * (wrongPinWindowMs / 10))).status, 400);
+  for (let index = 0; index < maximumWrongPins * 2; index++) assert.equal((await exchangePin(d1, "short", start + maximumWrongPins * 3 * (wrongPinWindowMs / 100))).status, 400);
   assert.equal(db.rows<{ failures: number }>("SELECT failures FROM part_requests_pairing_limits")[0]!.failures, failures);
 });
 
@@ -214,16 +215,17 @@ test("a bad key, a missing key and a revoked device are refused", async () => {
   assert.equal(await works(d1, key), false);
 });
 
-test("the routes answer as declared, and setup depends on the saved site address", async () => {
+test("the routes answer as declared, and setup depends on the site address and a verified connection", async () => {
   const { db, d1 } = setup();
   const route = api.routes["/public/part-requests"]!;
   const respond = (body: unknown, status = 200) => Response.json(body, { status });
-  const call = (path: string, init: RequestInit, body?: unknown) => { const request = new Request(`http://worker.test${path}`, init); return route({ request, url: new URL(request.url), db: d1, respond, json: async () => body }); };
+  const call = (path: string, init: RequestInit, body?: unknown) => { const request = new Request(`http://worker.test${path}`, init); return route({ request, url: new URL(request.url), db: d1, respond, json: async () => body, services: { credentials: { available: false } } }); };
   assert.equal(await call("/public/part-requests/other", { method: "POST" }), undefined);
   assert.equal(await call("/public/part-requests/pair", { method: "GET" }), undefined);
   const pin = pinIn(await command(d1, discordA, Date.now()));
   const paired = await call("/public/part-requests/pair", { method: "POST" }, { pin });
   assert.equal(paired!.status, 201);
+  assert.equal(paired!.headers.get("cache-control"), "no-store");
   const { deviceKey, memberName } = await paired!.json() as { deviceKey: string; memberName: string };
   assert.equal(memberName, "Test Student A");
   const refused = await call("/public/part-requests/ping", { method: "POST" }, { echo: "x" });
@@ -232,8 +234,8 @@ test("the routes answer as declared, and setup depends on the saved site address
   const ping = await call("/public/part-requests/ping", { method: "POST", headers: { authorization: `Bearer ${deviceKey}` } }, { echo: "hello" });
   assert.deepEqual(await ping!.json(), { ok: true, memberName: "Test Student A", pairedDevices: 1, echo: "hello" });
 
-  assert.equal(await api.setup.stepValid(d1, "site-address"), true);
+  assert.equal(await api.setup.stepValid(d1, "notion-connection"), true);
   db.run("DELETE FROM part_requests_settings");
-  assert.equal(await api.setup.stepValid(d1, "site-address"), false);
+  assert.equal(await api.setup.stepValid(d1, "notion-connection"), false);
   assert.match(await command(d1, discordB), /not set up/);
 });
