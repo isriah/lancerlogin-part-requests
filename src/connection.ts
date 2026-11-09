@@ -168,8 +168,9 @@ async function connect(context: AdminRouteContext, db: Database, actor: string, 
 
 /**
  * POST /verify: { token?, databaseUrl, dataSourceId? }. The setup page's one Verify button. With a token it checks the token
- * and the database first and saves both together, so a failed check leaves nothing behind. The one exception is a database
- * that needs a data source chosen: the token has proved itself by then, so it is saved and the page only asks for the choice.
+ * and the database first and saves both together, so a failed check leaves nothing behind and a token it would replace stays.
+ * The one exception is first-time setup with a database that needs a data source chosen: the token has proved itself by then and
+ * there is none to lose, so it is saved and the page only asks for the choice.
  */
 async function verify(context: AdminRouteContext, db: Database, actor: string, now: number) {
   const input = object(await context.json(4096));
@@ -189,7 +190,7 @@ async function verify(context: AdminRouteContext, db: Database, actor: string, n
     const schema = await client.connect(input.databaseUrl, input.dataSourceId as string | undefined, parseSchema(row));
     await db.batch([...await saveNewToken(), ...connectionStatements(db, schema, actor, now)]);
   } catch (error) {
-    if (error instanceof AppError && error.code === "data_source_required" && newToken) await db.batch(await saveNewToken());
+    if (error instanceof AppError && error.code === "data_source_required" && newToken && !row?.ciphertext) await db.batch(await saveNewToken());
     return notionFailure(error);
   }
   return status(context, db, now);

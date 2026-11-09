@@ -95,12 +95,22 @@ export function ConnectionCard({ status, onStatus, onVerified, openSetup }: { st
     setFocusTarget(replaceId);
   }
 
+  // With a database saved, the new token is checked against it and saved in one step, so requests never wait on a second step
+  // and a failure leaves the old token in place. Without one, as when setup stopped at choosing a data source, there is nothing
+  // to check against yet, so the token is saved on its own and the form below carries on.
   async function saveNewToken() {
     if (!newToken.trim()) { setReplaceError("Enter the new Notion token."); setFocusTarget(newTokenId); return; }
-    setBusy(true); setReplaceError(undefined); setResult(undefined);
+    setBusy(true); setReplaceError(undefined); setResult(undefined); setFormError("");
     try {
-      onStatus(await request<SetupStatus>(`${setupRoute}/token`, "PUT", { token: newToken.trim() }));
-      setResult({ notice: { content: "New token saved. Verify the connection to turn requests back on." }, key: Date.now() });
+      if (status.databaseId) {
+        const next = await request<SetupStatus>(`${setupRoute}/verify`, "POST", { token: newToken.trim(), databaseUrl: databaseLink(status.databaseId), ...(status.dataSourceId ? { dataSourceId: status.dataSourceId } : {}) });
+        await recordSetupStep();
+        onStatus(next);
+        setResult({ notice: { tone: "success", content: "New token saved and verified." }, key: Date.now() });
+      } else {
+        onStatus(await request<SetupStatus>(`${setupRoute}/token`, "PUT", { token: newToken.trim() }));
+        setResult({ notice: { content: "New token saved. Verify the connection to turn requests back on." }, key: Date.now() });
+      }
       setReplacing(false); setNewToken("");
     } catch (caught) { setReplaceError(errorText(caught, "The token could not be saved.")); setFocusTarget(newTokenId); }
     finally { setBusy(false); }
@@ -172,13 +182,13 @@ export function ConnectionCard({ status, onStatus, onVerified, openSetup }: { st
         </span>
       </div>
       <div className="pr-replace" id={`${ids}replace`} hidden={!replacing}>
-        <Field id={newTokenId} label="New token" help="Requests stop when a new token is saved, until the connection is verified again." error={replaceError}>
+        <Field id={newTokenId} label="New token" help={status.databaseId ? "Checked with Notion first. If the check fails, nothing changes." : "Saved once Notion accepts it. Verify the connection next."} error={replaceError}>
           <input {...fieldAria(newTokenId, replaceError)} type="password" autoComplete="new-password" spellCheck={false} maxLength={1000} disabled={busy} value={newToken}
             onChange={(event) => { setNewToken(event.target.value); setReplaceError(undefined); }}
             onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void saveNewToken(); } }} />
         </Field>
         <div className="module-actions">
-          <button className="ui-button" type="button" disabled={busy || !status.canSaveToken} onClick={() => void saveNewToken()}>{busy ? "Saving..." : "Save new token"}</button>
+          <button className="ui-button ui-button--primary" type="button" disabled={busy || !status.canSaveToken} onClick={() => void saveNewToken()}>{busy ? "Saving..." : status.databaseId ? "Save and verify" : "Save new token"}</button>
           <button className="ui-button" type="button" disabled={busy} onClick={closeReplace}>Cancel</button>
         </div>
       </div>

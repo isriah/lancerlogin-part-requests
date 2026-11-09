@@ -1065,13 +1065,12 @@ test("refused: the refresh job records it and clears it, and one person's name l
 });
 
 test("refused: a slow call made with a replaced token cannot mark the new one", async () => {
-  const key = await ready();
+  await ready();
   const { readConnection, recordRefusal } = await import("../src/connection.ts");
   const old = (await readConnection(h.db))!;
   assert.equal((await h.admin("POST", "/verify", { ...databaseLinkBody, token: testToken })).status, 200);
   await recordRefusal(h.db, old, "notion_401", Date.now());
   assert.equal((await statusOf()).problem, null);
-  void key;
 });
 
 test("refused: the token stays out of every answer, the database and the logs, and setup stays complete", async () => {
@@ -1088,6 +1087,77 @@ test("refused: the token stays out of every answer, the database and the logs, a
   assert.ok(seen.length >= 3);
   for (const text of seen) { assert.ok(!text.includes(testToken)); assert.ok(!text.includes("echo")); }
   assert.equal(await api.setup.stepValid(h.db, "notion-connection"), true, "a refusal must not lock the module");
+});
+
+// ---- Replacing a token, as the page does it: one POST /verify with the saved data source.
+const newToken = "ntn_TESTreplacementTokenNEVERreal0123456789ABCDEFGHIJ";
+const cipher = () => h.test.rows<any>("SELECT ciphertext,verified_ms,data_source_id FROM part_requests_notion")[0];
+const replace = () => h.admin("POST", "/verify", { token: newToken, databaseUrl: `https://app.notion.com/p/${databaseId.replaceAll("-", "")}`, dataSourceId });
+const acceptNewToken = () => { for (const match of [/^GET \/users\/me$/, /^GET \/databases\//, /^GET \/data_sources\//]) stub.on(match, (call) => call.headers.Authorization === `Bearer ${newToken}` ? fetchAsTestToken(call) : notionResponse({ code: "unauthorized" }, 401)); };
+const fetchAsTestToken = (call: { url: string }) => call.url.includes("/users/me") ? notionResponse({ object: "user", id: "b0000000-0000-4000-8000-000000000000", type: "bot", bot: {} })
+  : call.url.includes("/databases/") ? notionResponse({ object: "database", id: databaseId, data_sources: stub.dataSources }) : notionResponse({ ...stub.source, id: dataSourceId });
+
+test("replace: one call saves and verifies, with no moment when requests stay stopped, and the old token is gone", async () => {
+  await ready();
+  const before = cipher();
+  acceptNewToken();
+  const replaced = await replace();
+  assert.equal(replaced.status, 200, replaced.text);
+  assert.equal(replaced.body.problem, null);
+  assert.equal(replaced.body.dataSourceId, dataSourceId);
+  assert.notEqual(cipher().ciphertext, before.ciphertext);
+  assert.ok(cipher().verified_ms >= before.verified_ms);
+  assert.ok(!replaced.text.includes(newToken));
+  assert.equal(h.test.rows("SELECT 1 FROM audit_log WHERE action='part_requests.token_saved'").length, 2);
+});
+
+test("replace: each failure saves nothing, and the old token stays verified and working", async () => {
+  const key = await ready();
+  const before = cipher();
+  const unchanged = () => assert.deepEqual(cipher(), before);
+  // Rejected by Notion.
+  assert.equal((await replace()).body.code, "notion_token_rejected");
+  unchanged();
+  // Accepted, but it cannot reach the database.
+  stub.on(/^GET \/users\/me$/, () => notionResponse({ object: "user", id: "b", type: "bot", bot: {} }));
+  stub.on(/^GET \/databases\//, () => notionResponse({ code: "object_not_found" }, 404));
+  assert.equal((await replace()).body.code, "notion_404");
+  unchanged();
+  // Reaches it, but the layout no longer fits.
+  healthyNotion(); acceptNewToken();
+  delete stub.source.properties.SKU;
+  assert.equal((await replace()).body.code, "schema_mismatch");
+  unchanged();
+  // The saved data source has gone from the database: a choice is needed, and the old token still is not replaced.
+  healthyNotion(); acceptNewToken();
+  stub.dataSources = [{ id: otherDataSourceId, name: "Other" }, { id: "cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeeee", name: "Another" }];
+  assert.equal((await replace()).body.code, "data_source_required");
+  unchanged();
+  // Notion is down.
+  healthyNotion();
+  stub.on(/^GET \/users\/me$/, () => notionResponse({ message: "stub" }, 500));
+  assert.equal((await replace()).status, 502);
+  unchanged();
+  healthyNotion();
+  assert.equal((await send(key, uuid())).status, 201, "requests still work with the old token");
+});
+
+test("replace: first-time setup with several data sources still keeps the proven token and asks for the choice", async () => {
+  stub.dataSources = [{ id: dataSourceId, name: "Ordering" }, { id: otherDataSourceId, name: "Archive" }];
+  const refused = await h.admin("POST", "/verify", { token: testToken, databaseUrl: databaseId });
+  assert.equal(refused.body.code, "data_source_required");
+  assert.equal(h.test.rows<any>("SELECT ciphertext IS NOT NULL AS saved FROM part_requests_notion")[0].saved, 1);
+});
+
+test("replace: fixes a rejected token in the same step", async () => {
+  const key = await ready();
+  notionAnswers(/^POST \/pages$/, 401);
+  await send(key, uuid());
+  assert.equal((await statusOf()).problem, "notion_token_rejected");
+  healthyNotion(); acceptNewToken();
+  const replaced = await replace();
+  assert.equal(replaced.body.problem, null);
+  assert.equal(replaced.body.rejectedMs, null);
 });
 
 test("query counts: the routes stay small enough for Workers Free", async () => {
