@@ -6,7 +6,7 @@ export type Badge = { readonly label: string; readonly tone: Tone };
 export type SetupStatus = {
   readonly tokenSaved: boolean; readonly canSaveToken: boolean; readonly siteAddress: string | null;
   readonly databaseId: string | null; readonly dataSourceId: string | null; readonly dataSourceName: string | null;
-  readonly verifiedMs: number | null; readonly schemaError: string | null; readonly problem: string | null;
+  readonly verifiedMs: number | null; readonly schemaError: string | null; readonly problem: string | null; readonly rejectedMs: number | null;
   readonly recipients: number; readonly refresh: { readonly step: string; readonly finishedMs: number | null; readonly lastError: string | null } | null;
   readonly pairingPausedUntilMs: number | null; readonly pairedDevices: number; readonly deviceLimit: number; readonly cartsEnabled: boolean;
 };
@@ -170,8 +170,11 @@ export const revokeMessage = (device: Pick<Device, "label" | "memberName">) =>
 export const isConnected = (status: Pick<SetupStatus, "problem">) => status.problem === null;
 
 /** What stopped requests, in words an Admin can act on, or undefined when requests can flow. */
-export function connectionProblem(status: Pick<SetupStatus, "tokenSaved" | "problem" | "schemaError">): string | undefined {
+export function connectionProblem(status: Pick<SetupStatus, "tokenSaved" | "problem" | "schemaError"> & { readonly rejectedMs?: number | null }, timeZone?: string): string | undefined {
   if (status.problem === null) return undefined;
+  const when = status.rejectedMs ? ` on ${formatDateTime(status.rejectedMs, timeZone)}` : "";
+  if (status.problem === "notion_token_rejected") return `Notion rejected the saved token${when}, so requests and Carts have stopped. Paired devices stay paired and the log stays. To fix it, copy a new token from Notion's connections page and replace this one.`;
+  if (status.problem === "notion_access_lost") return `Notion refused access to the ordering database${when}, so requests and Carts have stopped. Paired devices stay paired and the log stays. To fix it, add the connection to the database in Notion and check its capabilities, then verify the connection again.`;
   if (status.problem === "notion_schema_changed") return `The Notion database no longer matches what Part Requests expects, so requests have stopped.${status.schemaError ? ` ${status.schemaError}` : ""}`;
   if (!status.tokenSaved) return "No Notion token is saved, so requests have stopped. This is expected after a restore: save the token and verify the connection again. Every device also pairs again.";
   return "A Notion token is saved, but the connection has not been verified, so requests have stopped. Verify the connection to turn them back on.";

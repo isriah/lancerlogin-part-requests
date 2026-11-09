@@ -123,6 +123,14 @@ test("the Connection tab's problem line says what stopped and what to do", () =>
   assert.match(connectionProblem({ tokenSaved: true, problem: "notion_not_connected", schemaError: null })!, /has not been verified/);
 });
 
+test("the Connection tab's problem line names a rejected token and lost access, when it happened, and the fix", () => {
+  const rejected = connectionProblem({ tokenSaved: true, problem: "notion_token_rejected", schemaError: null, rejectedMs: at }, zone)!;
+  assert.match(rejected, /^Notion rejected the saved token on Nov 8, 2:14 PM, so requests and Carts have stopped\. Paired devices stay paired and the log stays\. To fix it, copy a new token/);
+  const lost = connectionProblem({ tokenSaved: true, problem: "notion_access_lost", schemaError: null, rejectedMs: at }, zone)!;
+  assert.match(lost, /^Notion refused access to the ordering database on Nov 8, 2:14 PM.*add the connection to the database in Notion.*verify the connection again\.$/);
+  assert.match(connectionProblem({ tokenSaved: true, problem: "notion_token_rejected", schemaError: null })!, /^Notion rejected the saved token, so/);
+});
+
 test("the Connection tab's pairing and recipient notices", () => {
   assert.equal(pairingNotice(null), undefined);
   assert.match(pairingNotice(at, zone)!, /reopens by itself at 2:14 PM\. Devices that are already paired keep working\./);

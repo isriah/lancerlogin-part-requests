@@ -7,7 +7,7 @@
 //
 // This is the one GET route that writes and calls Notion. It can run during Core's maintenance, which only stops other methods.
 // Its writes are the rate limit and this copy, neither of which travels in a backup, and a failed write serves the old copy.
-import { connectionProblem, parseSchema, readCartsEnabled, readConnection, savedToken } from "./connection.ts";
+import { connectionProblem, parseSchema, readCartsEnabled, readConnection, savedToken, clearRefusal, recordRefusal, type ConnectionRow } from "./connection.ts";
 import { json, object, refuse } from "./http.ts";
 import { AppError, decodedId, NotionClient, validPageUrl, type Choice, type PropertyMapping, type Schema } from "./notion.ts";
 import { deviceKeyHash, deviceRefusedMessage, installationId, readDevice, type AuthenticatedDevice, type Database } from "./pairing.ts";
@@ -188,7 +188,7 @@ const backoffSeconds = (error: unknown) => {
 };
 
 /** One step of a refresh: claim it, read one Notion page, and save it. */
-async function refreshSlice(db: Database, state: OrdersState | null, device: AuthenticatedDevice, client: NotionClient, schema: Schema, open: readonly OpenStatus[], now: number): Promise<Slice> {
+async function refreshSlice(db: Database, state: OrdersState | null, device: AuthenticatedDevice, connection: ConnectionRow, client: NotionClient, schema: Schema, open: readonly OpenStatus[], now: number): Promise<Slice> {
   try {
     // The count and the claim commit together. An over-limit device or a held lease claims nothing, and neither does a request
     // that read the state before another request moved it on, which would read the same page again.
@@ -212,6 +212,7 @@ async function refreshSlice(db: Database, state: OrdersState | null, device: Aut
     const cursor = carryOn ? claimed.buildCursor ?? undefined : undefined;
 
     const page = await client.openOrdersPage(schema, open, ordersPageSize, cursor);
+    await clearRefusal(db, connection);
     const raw = page.rows.map((row) => orderFromRow(row, schema, open)).filter((order): order is RawOrder => order !== undefined);
     const orders = await finishOrders(db, raw);
     const skipped = (carryOn ? claimed.buildSkipped : 0) + page.rows.length - raw.length;
@@ -236,6 +237,7 @@ async function refreshSlice(db: Database, state: OrdersState | null, device: Aut
     const seconds = backoffSeconds(error);
     await db.prepare("UPDATE part_requests_orders_state SET build_generation=NULL,build_cursor=NULL,build_pages=0,build_started_ms=NULL,build_skipped=0,lease_until_ms=?,last_error=? WHERE installation_id=?")
       .bind(now + seconds * 1000, code, installationId).run().catch(() => undefined);
+    await recordRefusal(db, connection, code, now);
     return { kind: "failed", code, retryAfterSeconds: seconds };
   }
 }
@@ -310,7 +312,7 @@ export async function readOrders({ db, authorization, credentials, now }: Device
     if (!(error instanceof AppError)) throw error;
     return refuse(503, error.code, error.message);
   }
-  const slice = await refreshSlice(db, state, device, new NotionClient(token), schema, open, now);
+  const slice = await refreshSlice(db, state, device, connection as ConnectionRow, new NotionClient(token), schema, open, now);
   if (slice.kind === "published") return ordersAnswer(db, device, slice.snapshot, open, now);
   if (slice.kind === "more" || slice.kind === "busy") return snapshot ? ordersAnswer(db, device, snapshot, open, now, { refreshing: true }) : stillReading();
   if (slice.kind === "limited") return snapshot ? ordersAnswer(db, device, snapshot, open, now, { refreshError: "rate_limited" }) : rateLimited(slice.count, now);

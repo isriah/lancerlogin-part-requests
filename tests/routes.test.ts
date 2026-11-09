@@ -959,6 +959,137 @@ test("devices: exactly 500 on the roster raises the flag, because Core's project
   assert.ok(!full.text.includes("ext-"));
 });
 
+// ---- A token Notion refuses after it was verified.
+const statusOf = async () => (await h.admin("GET", "/status")).body;
+const notionAnswers = (match: RegExp, code: number) => stub.on(match, () => notionResponse({ code: "stub", message: `echo ${testToken}` }, code));
+const healthyNotion = () => { stub.restore(); stub = stubNotion(); };
+const databaseLinkBody = { databaseUrl: databaseId, dataSourceId };
+
+for (const [code, problem] of [[401, "notion_token_rejected"], [403, "notion_access_lost"], [404, "notion_access_lost"]] as const) {
+  test(`refused: a ${code} from a request shows ${problem}, keeps the student's answer, and the next call that works clears it`, async () => {
+    const key = await ready();
+    assert.equal((await statusOf()).problem, null);
+    notionAnswers(/^POST \/pages$/, code);
+    const before = Date.now();
+    const refused = await send(key, uuid());
+    assert.equal(refused.status, 502);
+    assert.equal(refused.body.code, `notion_${code}`, "what the student is told does not change");
+    const status = await statusOf();
+    assert.equal(status.problem, problem);
+    assert.ok(status.rejectedMs >= before);
+    assert.equal(status.tokenSaved, true);
+    assert.equal(status.verifiedMs !== null, true, "the connection itself stays");
+    assert.equal(h.test.rows<any>("SELECT rejection_code FROM part_requests_notion")[0].rejection_code, `notion_${code}`);
+    healthyNotion();
+    assert.equal((await send(key, uuid())).status, 201, "requests keep trying, so a glitch can clear itself");
+    const after = await statusOf();
+    assert.equal(after.problem, null);
+    assert.equal(after.rejectedMs, null);
+  });
+}
+
+for (const code of [500, 429, 400, 409]) {
+  test(`refused: a passing ${code} says nothing about the token`, async () => {
+    const key = await ready();
+    notionAnswers(/^POST \/pages$/, code);
+    await send(key, uuid());
+    assert.equal((await statusOf()).problem, null);
+    assert.equal(h.test.rows<any>("SELECT rejected_ms FROM part_requests_notion")[0].rejected_ms, null);
+  });
+}
+
+test("refused: a passing 500 neither sets it nor clears one already recorded, and the first time stands", async () => {
+  const key = await ready();
+  notionAnswers(/^POST \/pages$/, 401);
+  await send(key, uuid());
+  const first = (await statusOf()).rejectedMs;
+  h.test.run("UPDATE part_requests_notion SET rejected_ms=?", first - 5000);
+  await send(key, uuid());
+  assert.equal((await statusOf()).rejectedMs, first - 5000, "the same refusal keeps its first time");
+  notionAnswers(/^POST \/pages$/, 500);
+  await send(key, uuid());
+  assert.equal((await statusOf()).problem, "notion_token_rejected");
+});
+
+test("refused: a successful verify clears it, with the saved token or a new one, and so does removing the token", async () => {
+  const key = await ready();
+  notionAnswers(/^POST \/pages$/, 401);
+  await send(key, uuid());
+  healthyNotion();
+  assert.equal((await h.admin("POST", "/verify", databaseLinkBody)).body.problem, null);
+  notionAnswers(/^POST \/pages$/, 403);
+  await send(key, uuid());
+  healthyNotion();
+  assert.equal((await h.admin("POST", "/verify", { ...databaseLinkBody, token: testToken })).body.problem, null);
+  notionAnswers(/^POST \/pages$/, 401);
+  await send(key, uuid());
+  const removed = await h.admin("DELETE", "/token");
+  assert.equal(removed.body.problem, "notion_not_connected");
+  assert.equal(removed.body.rejectedMs, null);
+});
+
+test("refused: a failed verify changes nothing, and a problem that stops requests is reported ahead of it", async () => {
+  const key = await ready();
+  notionAnswers(/^POST \/pages$/, 401);
+  await send(key, uuid());
+  notionAnswers(/^GET \/databases\//, 401);
+  assert.equal((await h.admin("POST", "/verify", databaseLinkBody)).status, 422);
+  assert.equal((await statusOf()).problem, "notion_token_rejected");
+  h.test.run("UPDATE part_requests_notion SET schema_error='Changed'");
+  assert.equal((await statusOf()).problem, "notion_schema_changed");
+});
+
+test("refused: the refresh job records it and clears it, and one person's name lookup does neither", async () => {
+  await h.connect();
+  await h.runJob();
+  notionAnswers(/^GET \/data_sources\//, 401);
+  h.test.run("UPDATE part_requests_recipient_refresh SET next_due_ms=0,step='idle'");
+  assert.deepEqual((await h.runJob()).at(-1), { failed: "notion_401" });
+  assert.equal((await statusOf()).problem, "notion_token_rejected");
+  healthyNotion();
+  h.test.run("UPDATE part_requests_recipient_refresh SET next_due_ms=0,step='idle'");
+  await h.runJob();
+  assert.equal((await statusOf()).problem, null);
+  // Cron mode runs several slices with one read of the row: a clear then a refusal in the same run must still be recorded.
+  notionAnswers(/^GET \/users\?/, 403);
+  h.test.run("UPDATE part_requests_notion SET rejection_code='notion_401',rejected_ms=1");
+  h.test.run("UPDATE part_requests_recipient_refresh SET next_due_ms=0,step='idle'");
+  await h.runJob(false);
+  assert.equal((await statusOf()).problem, "notion_access_lost");
+  healthyNotion();
+  stub.on(new RegExp(`^GET /users/${namelessGuest}$`), () => notionResponse({ code: "object_not_found" }, 404));
+  h.test.run("UPDATE part_requests_recipient_refresh SET next_due_ms=0,step='idle'");
+  h.test.run("UPDATE part_requests_recipients SET name_checked=0 WHERE name=''");
+  await h.runJob();
+  assert.equal((await statusOf()).problem, null);
+});
+
+test("refused: a slow call made with a replaced token cannot mark the new one", async () => {
+  const key = await ready();
+  const { readConnection, recordRefusal } = await import("../src/connection.ts");
+  const old = (await readConnection(h.db))!;
+  assert.equal((await h.admin("POST", "/verify", { ...databaseLinkBody, token: testToken })).status, 200);
+  await recordRefusal(h.db, old, "notion_401", Date.now());
+  assert.equal((await statusOf()).problem, null);
+  void key;
+});
+
+test("refused: the token stays out of every answer, the database and the logs, and setup stays complete", async () => {
+  const seen: string[] = [];
+  const saved = { log: console.log, error: console.error, warn: console.warn };
+  for (const name of ["log", "error", "warn"] as const) console[name] = (...args: unknown[]) => { seen.push(args.join(" ")); };
+  try {
+    const key = await ready();
+    notionAnswers(/^POST \/pages$/, 401);
+    seen.push((await send(key, uuid())).text);
+    seen.push((await h.admin("GET", "/status")).text);
+    seen.push(JSON.stringify(h.test.rows("SELECT rejection_code,rejected_ms FROM part_requests_notion")));
+  } finally { Object.assign(console, saved); }
+  assert.ok(seen.length >= 3);
+  for (const text of seen) { assert.ok(!text.includes(testToken)); assert.ok(!text.includes("echo")); }
+  assert.equal(await api.setup.stepValid(h.db, "notion-connection"), true, "a refusal must not lock the module");
+});
+
 test("query counts: the routes stay small enough for Workers Free", async () => {
   await h.connect();
   await h.runJob();

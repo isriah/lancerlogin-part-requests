@@ -690,6 +690,25 @@ test("a device revoked between the check and the write records nothing", async (
   assert.equal(h.test.rows("SELECT * FROM part_requests_cart_marks").length, 0);
 });
 
+test("refused: a 401, 403 or 404 reading orders shows on the Admin page and the next read clears it; a 500 or 429 does not set it", async () => {
+  await h.connect();
+  const key = await h.pair();
+  const status = async () => (await h.admin("GET", "/status")).body.problem;
+  for (const [code, problem] of [[401, "notion_token_rejected"], [403, "notion_access_lost"], [404, "notion_access_lost"], [500, null], [429, null]] as const) {
+    stub.restore(); stub = stubNotion();
+    stub.on(queryPath, () => notionResponse({ code: "stub" }, code));
+    noBackoff(); ageCopy(0);
+    await get(key);
+    assert.equal(await status(), problem, String(code));
+    stub.restore(); stub = stubNotion();
+    stub.on(queryPath, () => notionResponse({ object: "list", results: [], has_more: false, next_cursor: null }));
+    noBackoff();
+    assert.equal((await get(key)).status, 200);
+    assert.equal(await status(), null, `cleared after ${code}`);
+    h.test.run("UPDATE part_requests_orders_state SET published_ms=published_ms-3600000");
+  }
+});
+
 test("the Notion token is in no answer, no table, and only ever in the Authorization header", async () => {
   const key = await ready();
   answerWith(row(1));

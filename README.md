@@ -16,7 +16,9 @@ Students click a browser extension on a vendor's product page, review the detail
 - **Requests log:** every request with its member and device, newest first, with a banner when any result is uncertain.
 - **Paired devices:** counts, search by name or device, and filters for No devices, At the limit, Inactive 30+ days and Off roster, then one compact row per member by name, including members with no devices. A row opens to that member's devices, with Revoke. Inactive is a prompt to look, not a reason to revoke: last used only changes when a device sends a request or marks a cart item.
 
-Core shows its own setup screen by itself until setup is complete, and an Admin can reopen it from Connection. Core keeps a module open once its setup is complete, so replacing or removing the token later stops requests without closing these pages.
+Core shows its own setup screen by itself until setup is complete, and an Admin can reopen it from Connection. When Notion answers 401, 403 or 404 to a request, an orders read or the refresh job, the code and time are recorded and Connection shows the rejected token or lost access at the top instead of Connected. A 500 or a 429 records nothing. It clears on a successful verify, a new or removed token, or the next Notion call that works, so a brief glitch doesn't stick. It doesn't stop requests or change what students are told: each call still tries Notion and reports its own result.
+
+Core keeps a module open once its setup is complete, so replacing or removing the token later stops requests without closing these pages.
 
 ## Setup (Admin)
 
@@ -24,7 +26,7 @@ Core refuses `/admin/<module>` until a module's setup is complete, so setup uses
 
 | Route | Body | Result |
 | --- | --- | --- |
-| `GET /status` | | What is saved and what is missing. Says whether a token is saved, never the token. Also `dataSourceName`, `pairingPausedUntilMs` (the shared pause, `null` when pairing is open), `pairedDevices`, `deviceLimit` and `cartsEnabled`. |
+| `GET /status` | | What is saved and what is missing. Says whether a token is saved, never the token. Also `problem`, which adds `notion_token_rejected` and `notion_access_lost` with `rejectedMs` when Notion has refused the saved token, `dataSourceName`, `pairingPausedUntilMs` (the shared pause, `null` when pairing is open), `pairedDevices`, `deviceLimit` and `cartsEnabled`. |
 | `POST /verify` | `{ token?, databaseUrl, dataSourceId? }` | What the setup page's Verify button calls. Checks the token and the database, then saves both together, so a failed check saves nothing. The exception is `409 data_source_required`, which lists the choices and keeps the token, because it has already proved itself. Leave out `token` to use the saved one. Refusals are the same as `PUT /token` and `POST /connection`. |
 | `PUT /token` | `{ token }` | Checks the token with Notion, encrypts and saves it, and saves the dashboard address as the site address. A replaced token must be verified again with `POST /connection`. |
 | `DELETE /token` | | Removes the token. Requests stop. |

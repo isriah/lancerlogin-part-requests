@@ -10,5 +10,9 @@
   {
     "name": "0003_carts.sql",
     "sha256": "507e0499bf82a34f05cac890471b1b85fea20341ae3fe092a0a915e736d2661f"
+  },
+  {
+    "name": "0004_notion_rejection.sql",
+    "sha256": "f64c70591391d3dcfaf4df76b0e9da5c53c0a05d84b6a80e4d08708497ed89b0"
   }
 ]

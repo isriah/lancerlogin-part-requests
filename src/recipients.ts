@@ -1,7 +1,7 @@
 // The refresh job: re-reads the database's layout, then workspace members, then people named on existing requests, then any
 // missing names. It makes one Notion call per scheduler slice and keeps its place in the database, which is what Workers
 // Free's 10 ms CPU limit asks of a job. Every module write pokes jobs, so it first checks whether a run is due.
-import { parseSchema, readConnection, savedToken, type ConnectionRow, type Credentials } from "./connection.ts";
+import { clearRefusal, parseSchema, readConnection, recordRefusal, savedToken, type ConnectionRow, type Credentials } from "./connection.ts";
 import { AppError, NotionClient, type Person, type Schema } from "./notion.ts";
 import { installationId, type Database } from "./pairing.ts";
 
@@ -108,9 +108,13 @@ export async function refreshRecipients(context: JobContext): Promise<unknown> {
     return { failed: error.code };
   }
   const steps = context.scheduler?.steps === true;
+  let current = connection;
   try {
     for (let run = 0; run < (steps ? 1 : cronSlices); run++) {
+      const step = refresh.step;
       const more = await slice(db, refresh, connection, schema, client, now);
+      // Every step but names made a Notion call that worked. A name lookup can fail for one person and says nothing about access.
+      if (step !== "names" && current.rejectionCode) { await clearRefusal(db, current); current = { ...current, rejectionCode: null, rejectedMs: null }; }
       if (!more) return { done: true };
       const next = await db.prepare("SELECT step,cursor,pages,next_due_ms AS nextDue FROM part_requests_recipient_refresh WHERE installation_id=?").bind(installationId).first<Refresh>();
       if (!next) return { done: true };
@@ -120,6 +124,7 @@ export async function refreshRecipients(context: JobContext): Promise<unknown> {
     // Only codes reach the record. Wait for the next try rather than asking the scheduler to repeat a failure.
     if (!(error instanceof AppError)) throw error;
     await finishRun(db, now, error.code, refreshRetryMs);
+    await recordRefusal(db, current, error.code, now);
     return { failed: error.code };
   }
   return { more: true, cursor: refresh.step };

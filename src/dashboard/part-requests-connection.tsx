@@ -119,7 +119,12 @@ export function ConnectionCard({ status, onStatus, onVerified, openSetup }: { st
   const problem = status.problem === "notion_schema_changed" ? connectionProblem(status) : undefined;
   const noEncryption = !status.canSaveToken && <p className="ui-status settings-notice pr-notice" data-tone="error" role="alert">Credential encryption is unavailable on this installation, so a token cannot be saved.</p>;
   // The fix for what stopped requests: verify with what is saved, or go to the token field. Without encryption there is no fix to offer here.
-  const fix = status.tokenSaved
+  const rejected = status.problem === "notion_token_rejected";
+  // A rejected token has nothing to verify: it needs replacing, so the tab leaves the database link and Verify out.
+  const repairing = !connected && !(onTab && rejected);
+  const fix = rejected
+    ? <button className="ui-button" type="button" onClick={() => { setReplacing(true); setFocusTarget(newTokenId); }}>Replace token</button>
+    : status.tokenSaved
     ? <button className="ui-button" type="submit" form={formId} disabled={busy}>{busy ? "Verifying..." : "Verify connection"}</button>
     : status.canSaveToken ? <button className="ui-button" type="button" onClick={() => setFocusTarget(tokenId)}>Enter token</button> : undefined;
   const problemText = onTab ? connectionProblem(status) : undefined;
@@ -160,7 +165,7 @@ export function ConnectionCard({ status, onStatus, onVerified, openSetup }: { st
 
     {status.tokenSaved && <div className="pr-field">
       <div className="saved-credentials" role="group" aria-label="Notion connection token">
-        <span className="pr-saved-state"><strong>Notion connection token</strong><Pill badge={{ label: "Saved", tone: "success" }} /></span>
+        <span className="pr-saved-state"><strong>Notion connection token</strong><Pill badge={rejected ? { label: "Rejected", tone: "error" } : { label: "Saved", tone: "success" }} /></span>
         <span className="saved-credentials-actions">
           <button id={replaceId} className="ui-button" type="button" disabled={busy} aria-expanded={replacing} aria-controls={`${ids}replace`} onClick={() => { if (replacing) closeReplace(); else { setReplacing(true); setFocusTarget(newTokenId); } }}>Replace token</button>
           <button className="ui-button ui-button--danger" type="button" disabled={busy} onClick={() => { setRemoveError(""); setRemoving(true); }}>Remove token</button>
@@ -181,7 +186,7 @@ export function ConnectionCard({ status, onStatus, onVerified, openSetup }: { st
 
     {(connected || onTab) && facts}
 
-    {!connected && <>
+    {repairing && <>
       <Field id={linkId} label="Database link" help={linkHelp} error={linkError}>
         <input {...fieldAria(linkId, linkError)} type="url" inputMode="url" placeholder="https://app.notion.com/p/..." spellCheck={false} maxLength={2000} disabled={busy} value={link}
           onChange={(event) => { setLink(event.target.value); setLinkError(undefined); setSources(undefined); setSourceId(""); }} />
@@ -204,7 +209,7 @@ export function ConnectionCard({ status, onStatus, onVerified, openSetup }: { st
       <div className="module-actions"><button className="ui-button ui-button--primary" type="submit" disabled={busy || !status.tokenSaved && !status.canSaveToken}>{busy ? "Verifying..." : "Verify connection"}</button>{setupButton}</div>
     </>}
     {formError && connected && <p className="ui-status settings-notice pr-notice" data-tone="error" role="alert">{formError}</p>}
-    {connected && setupButton && <div className="module-actions">{setupButton}</div>}
+    {!repairing && setupButton && <div className="module-actions">{setupButton}</div>}
 
     {removing && <ConfirmDialog title="Remove the Notion token?" keepLabel="Keep token" confirmLabel="Remove token" busy={busy} error={removeError} onConfirm={() => void removeToken()} onClose={() => setRemoving(false)}
       message="Requests from the browser extension stop at once, until a new token is saved and the connection is verified again. Paired devices stay paired and the log stays." />}
