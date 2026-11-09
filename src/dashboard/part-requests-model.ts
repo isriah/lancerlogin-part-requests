@@ -173,8 +173,8 @@ export const isConnected = (status: Pick<SetupStatus, "problem">) => status.prob
 export function connectionProblem(status: Pick<SetupStatus, "tokenSaved" | "problem" | "schemaError"> & { readonly rejectedMs?: number | null }, timeZone?: string): string | undefined {
   if (status.problem === null) return undefined;
   const when = status.rejectedMs ? ` on ${formatDateTime(status.rejectedMs, timeZone)}` : "";
-  if (status.problem === "notion_token_rejected") return `Notion rejected the saved token${when}, so requests and Carts have stopped. Paired devices stay paired and the log stays. To fix it, copy a new token from Notion's connections page and replace this one.`;
-  if (status.problem === "notion_access_lost") return `Notion refused access to the ordering database${when}, so requests and Carts have stopped. Paired devices stay paired and the log stays. To fix it, add the connection to the database in Notion and check its capabilities, then verify the connection again.`;
+  if (status.problem === "notion_token_rejected") return `Notion rejected the saved token${when}, so new requests and Carts refreshes will fail until this is fixed. Paired devices stay paired and the log stays. To fix it, copy a new token from Notion's connections page and replace this one.`;
+  if (status.problem === "notion_access_lost") return `Notion refused access to the ordering database${when}, so new requests and Carts refreshes will fail until this is fixed. Paired devices stay paired and the log stays. To fix it, add the connection to the database in Notion and check its capabilities, then verify the connection again.`;
   if (status.problem === "notion_schema_changed") return `The Notion database no longer matches what Part Requests expects, so requests have stopped.${status.schemaError ? ` ${status.schemaError}` : ""}`;
   if (!status.tokenSaved) return "No Notion token is saved, so requests have stopped. This is expected after a restore: save the token and verify the connection again. Every device also pairs again.";
   return "A Notion token is saved, but the connection has not been verified, so requests have stopped. Verify the connection to turn them back on.";
@@ -186,5 +186,6 @@ export function pairingNotice(pausedUntilMs: number | null, timeZone?: string): 
 
 export function refreshNotice(refresh: SetupStatus["refresh"], timeZone?: string): string | undefined {
   if (!refresh?.lastError) return undefined;
+  if (refresh.lastError === "notion_users_403") return "Workspace members could not be listed, so only people named on existing requests are being added. Check that the connection has the Read user information capability.";
   return `The last refresh could not finish. It tries again within an hour.${refresh.finishedMs ? ` The list from ${formatDateTime(refresh.finishedMs, timeZone)} is still in use.` : ""}`;
 }

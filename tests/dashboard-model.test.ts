@@ -125,10 +125,11 @@ test("the Connection tab's problem line says what stopped and what to do", () =>
 
 test("the Connection tab's problem line names a rejected token and lost access, when it happened, and the fix", () => {
   const rejected = connectionProblem({ tokenSaved: true, problem: "notion_token_rejected", schemaError: null, rejectedMs: at }, zone)!;
-  assert.match(rejected, /^Notion rejected the saved token on Nov 8, 2:14 PM, so requests and Carts have stopped\. Paired devices stay paired and the log stays\. To fix it, copy a new token/);
+  assert.match(rejected, /^Notion rejected the saved token on Nov 8, 2:14 PM, so new requests and Carts refreshes will fail until this is fixed\. Paired devices stay paired and the log stays\. To fix it, copy a new token/);
   const lost = connectionProblem({ tokenSaved: true, problem: "notion_access_lost", schemaError: null, rejectedMs: at }, zone)!;
-  assert.match(lost, /^Notion refused access to the ordering database on Nov 8, 2:14 PM.*add the connection to the database in Notion.*verify the connection again\.$/);
+  assert.match(lost, /^Notion refused access to the ordering database on Nov 8, 2:14 PM, so new requests and Carts refreshes will fail until this is fixed\..*add the connection to the database in Notion.*verify the connection again\.$/);
   assert.match(connectionProblem({ tokenSaved: true, problem: "notion_token_rejected", schemaError: null })!, /^Notion rejected the saved token, so/);
+  for (const text of [rejected, lost]) assert.doesNotMatch(text, /have stopped/, "a refusal does not block requests, and Carts can serve its copy");
 });
 
 test("the Connection tab's pairing and recipient notices", () => {
@@ -138,4 +139,5 @@ test("the Connection tab's pairing and recipient notices", () => {
   assert.equal(refreshNotice({ step: "idle", finishedMs: at, lastError: null }), undefined);
   assert.match(refreshNotice({ step: "idle", finishedMs: at, lastError: "notion_500" }, zone)!, /could not finish.*The list from Nov 8, 2:14 PM is still in use/);
   assert.doesNotMatch(refreshNotice({ step: "idle", finishedMs: null, lastError: "notion_500" }, zone)!, /still in use/);
+  assert.equal(refreshNotice({ step: "idle", finishedMs: at, lastError: "notion_users_403" }, zone), "Workspace members could not be listed, so only people named on existing requests are being added. Check that the connection has the Read user information capability.");
 });

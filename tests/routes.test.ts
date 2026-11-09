@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import { createHarness, dashboard, discordA, discordB, goodDraft, testCredentials, type Harness } from "./helpers/harness.ts";
 import { dataSource, dataSourceId, databaseId, guestPerson, memberPerson, namelessGuest, notionResponse, otherDataSourceId, stubNotion, testToken, type Stub } from "./helpers/notion-stub.ts";
-import { memberRows } from "../src/dashboard/part-requests-model.ts";
+import { memberRows, refreshNotice } from "../src/dashboard/part-requests-model.ts";
 import { maximumCreates, maximumGeneral, minimumExtensionVersion, pendingLimitMs, repeatWindowMs } from "../src/requests.ts";
 import { clientAddress, deviceLimitMessage, exchangePin, issuePin, maximumDevicesPerMember, maximumWrongPins, maximumWrongPinsPerAddress, pairingPauseMs, workerSubrequestAddress } from "../src/pairing.ts";
 
@@ -1051,7 +1051,7 @@ test("refused: the refresh job records it and clears it, and one person's name l
   await h.runJob();
   assert.equal((await statusOf()).problem, null);
   // Cron mode runs several slices with one read of the row: a clear then a refusal in the same run must still be recorded.
-  notionAnswers(/^GET \/users\?/, 403);
+  notionAnswers(/^POST \/data_sources\//, 403);
   h.test.run("UPDATE part_requests_notion SET rejection_code='notion_401',rejected_ms=1");
   h.test.run("UPDATE part_requests_recipient_refresh SET next_due_ms=0,step='idle'");
   await h.runJob(false);
@@ -1062,6 +1062,116 @@ test("refused: the refresh job records it and clears it, and one person's name l
   h.test.run("UPDATE part_requests_recipients SET name_checked=0 WHERE name=''");
   await h.runJob();
   assert.equal((await statusOf()).problem, null);
+});
+
+const refreshRow = () => h.test.rows<any>("SELECT step,last_error,finished_ms,next_due_ms FROM part_requests_recipient_refresh")[0];
+const jobDue = (step = "idle") => h.test.run("UPDATE part_requests_recipient_refresh SET next_due_ms=0,step=?,cursor=NULL,pages=0", step);
+
+test("recipients: a 403 listing users is not lost access, and the refresh carries on from the people on requests", async () => {
+  await h.connect();
+  notionAnswers(/^GET \/users\?/, 403);
+  const started = Date.now();
+  const outcomes = await h.runJob();
+  assert.deepEqual(outcomes.at(-1), { done: true }, "the run finishes");
+  assert.equal((await statusOf()).problem, null);
+  assert.equal(h.test.rows<any>("SELECT rejection_code,rejected_ms FROM part_requests_notion")[0].rejection_code, null);
+  assert.ok(h.test.rows("SELECT 1 FROM part_requests_recipients WHERE notion_user_id=?", guestPerson).length === 1, "people on requests are still found");
+  const row = refreshRow();
+  assert.equal(row.step, "idle");
+  assert.equal(row.last_error, "notion_users_403", "kept for the notice");
+  assert.ok(row.finished_ms >= started, "it counts as a finished refresh");
+  assert.ok(row.next_due_ms > started + 60 * 60_000, "the normal interval, not the failure retry");
+  const status = await statusOf();
+  assert.match(refreshNotice(status.refresh)!, /^Workspace members could not be listed.*Read user information capability\.$/);
+  assert.ok(!JSON.stringify(status).includes("Authorization"));
+});
+
+test("recipients: the users notice goes when users can be listed again, and a later failure is reported as a failure", async () => {
+  await h.connect();
+  notionAnswers(/^GET \/users\?/, 403);
+  await h.runJob();
+  assert.equal(refreshRow().last_error, "notion_users_403");
+  healthyNotion();
+  jobDue();
+  await h.runJob();
+  assert.equal(refreshRow().last_error, null);
+  notionAnswers(/^GET \/users\?/, 403);
+  notionAnswers(/^POST \/data_sources\//, 500);
+  jobDue();
+  await h.runJob();
+  assert.equal(refreshRow().last_error, "notion_500", "the run failed, so that is what it says");
+  assert.equal((await statusOf()).problem, null);
+});
+
+test("recipients: a 401 listing users is a rejected token; a 404 or a 500 there fails the run but records no refusal", async () => {
+  await h.connect();
+  notionAnswers(/^GET \/users\?/, 401);
+  assert.deepEqual((await h.runJob()).at(-1), { failed: "notion_401" });
+  assert.equal((await statusOf()).problem, "notion_token_rejected");
+  for (const code of [404, 500]) {
+    healthyNotion();
+    jobDue();
+    await h.runJob();
+    assert.equal((await statusOf()).problem, null);
+    notionAnswers(/^GET \/users\?/, code);
+    jobDue();
+    assert.deepEqual((await h.runJob()).at(-1), { failed: `notion_${code}` });
+    assert.equal((await statusOf()).problem, null, String(code));
+  }
+});
+
+test("recipients: success listing users does not clear a refusal the database still gets", async () => {
+  await h.connect();
+  await h.runJob();
+  // Only the users step runs here, with a refusal already recorded.
+  h.test.run("UPDATE part_requests_notion SET rejection_code='notion_403',rejected_ms=5");
+  jobDue("users");
+  assert.equal((await h.runJob(true, 1)).at(-1).more, true);
+  assert.equal(refreshRow().step, "requests", "the step ran");
+  assert.equal((await statusOf()).problem, "notion_access_lost");
+  assert.equal((await statusOf()).rejectedMs, 5);
+  // The whole run: users answer, and the query the database gets is refused, so it ends recorded.
+  for (const code of [403, 404]) {
+    healthyNotion();
+    notionAnswers(/^POST \/data_sources\//, code);
+    jobDue();
+    assert.deepEqual((await h.runJob()).at(-1), { failed: `notion_${code}` });
+    assert.equal((await statusOf()).problem, "notion_access_lost", String(code));
+  }
+  // Then the database answers, with users still forbidden, and that does clear it.
+  healthyNotion();
+  notionAnswers(/^GET \/users\?/, 403);
+  jobDue();
+  await h.runJob();
+  assert.equal((await statusOf()).problem, null);
+});
+
+test("recipients: a 403 or 404 reading the schema is lost access", async () => {
+  for (const code of [403, 404]) {
+    stub.restore(); stub = stubNotion(); h = createHarness(api);
+    await h.connect();
+    notionAnswers(/^GET \/data_sources\//, code);
+    assert.deepEqual((await h.runJob()).at(-1), { failed: `notion_${code}` });
+    assert.equal((await statusOf()).problem, "notion_access_lost", String(code));
+  }
+});
+
+test("recipients: a 401 looking up one name is a rejected token, and that person is looked up again; a 404 there is neither", async () => {
+  await h.connect();
+  await h.runJob();
+  h.test.run("INSERT OR REPLACE INTO part_requests_recipients(installation_id,notion_user_id,name,last_seen_ms,name_checked) VALUES ('primary',?,'',?,0)", namelessGuest, Date.now());
+  const checked = () => h.test.rows<any>("SELECT name_checked FROM part_requests_recipients WHERE notion_user_id=?", namelessGuest)[0].name_checked;
+  notionAnswers(new RegExp(`^GET /users/${namelessGuest}$`), 404);
+  jobDue("names");
+  await h.runJob();
+  assert.equal((await statusOf()).problem, null);
+  assert.equal(checked(), 1);
+  h.test.run("UPDATE part_requests_recipients SET name_checked=0 WHERE notion_user_id=?", namelessGuest);
+  notionAnswers(new RegExp(`^GET /users/${namelessGuest}$`), 401);
+  jobDue("names");
+  assert.deepEqual((await h.runJob()).at(-1), { failed: "notion_401" });
+  assert.equal((await statusOf()).problem, "notion_token_rejected");
+  assert.equal(checked(), 0);
 });
 
 test("refused: a slow call made with a replaced token cannot mark the new one", async () => {

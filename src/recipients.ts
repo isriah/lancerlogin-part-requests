@@ -18,6 +18,12 @@ const pruneAfterMs = 24 * 60 * 60_000;
 /** Slices per run under Core's cron fallback, which has no one-step-per-slice mode. Its pass allows few provider requests. */
 const cronSlices = 5;
 
+/**
+ * Kept in last_error on a run that otherwise finished: Notion refused to list workspace members, which is what a connection
+ * without "Read user information" gets. People named on requests are still found, so it is a notice and not a failed run.
+ */
+const usersForbidden = "notion_users_403";
+
 type Refresh = { readonly step: string; readonly cursor: string | null; readonly pages: number; readonly nextDue: number };
 type JobContext = { readonly db: unknown; readonly services: { readonly credentials: Credentials }; readonly scheduler?: { readonly steps: boolean } };
 
@@ -32,7 +38,7 @@ const upsert = (db: Database, person: Person, now: number) =>
     .bind(installationId, person.id, person.name.slice(0, 200), now);
 
 const finishRun = (db: Database, now: number, error: string | null, retryMs: number) => db.batch([
-  db.prepare("UPDATE part_requests_recipient_refresh SET step='idle',cursor=NULL,pages=0,next_due_ms=?,finished_ms=CASE WHEN ? IS NULL THEN ? ELSE finished_ms END,last_error=? WHERE installation_id=?").bind(now + retryMs, error, now, error, installationId),
+  db.prepare("UPDATE part_requests_recipient_refresh SET step='idle',cursor=NULL,pages=0,next_due_ms=?,finished_ms=CASE WHEN ? IS NULL THEN ? ELSE finished_ms END,last_error=CASE WHEN ? IS NULL AND last_error=? THEN last_error ELSE ? END WHERE installation_id=?").bind(now + retryMs, error, now, error, usersForbidden, error, installationId),
   ...(error ? [] : [
     db.prepare("DELETE FROM part_requests_recipients WHERE installation_id=? AND last_seen_ms<?").bind(installationId, now - recipientRetentionMs),
     db.prepare("DELETE FROM part_requests_device_limits WHERE installation_id=? AND window_start_ms<?").bind(installationId, now - pruneAfterMs),
@@ -63,8 +69,21 @@ async function slice(db: Database, refresh: Refresh, connection: ConnectionRow, 
     return true;
   }
   if (refresh.step === "users") {
-    const page = await client.usersPage(refresh.cursor ?? undefined);
-    await db.batch([...page.people.map((person) => upsert(db, person, now)), page.next ? setState(db, "users", page.next, 0) : setState(db, "requests", null, 0)]);
+    let page: Awaited<ReturnType<NotionClient["usersPage"]>>;
+    try { page = await client.usersPage(refresh.cursor ?? undefined); }
+    catch (error) {
+      if (!(error instanceof AppError) || error.code !== "notion_403") throw error;
+      await db.batch([
+        db.prepare("UPDATE part_requests_recipient_refresh SET last_error=? WHERE installation_id=?").bind(usersForbidden, installationId),
+        setState(db, "requests", null, 0),
+      ]);
+      return true;
+    }
+    await db.batch([
+      db.prepare("UPDATE part_requests_recipient_refresh SET last_error=NULL WHERE installation_id=? AND last_error=?").bind(installationId, usersForbidden),
+      ...page.people.map((person) => upsert(db, person, now)),
+      page.next ? setState(db, "users", page.next, 0) : setState(db, "requests", null, 0),
+    ]);
     return true;
   }
   if (refresh.step === "requests") {
@@ -81,10 +100,12 @@ async function slice(db: Database, refresh: Refresh, connection: ConnectionRow, 
   }
   let name = "";
   try { name = await client.userName(nameless.id); }
-  catch (error) { if (!(error instanceof AppError)) throw error; }
+  catch (error) { if (!(error instanceof AppError) || error.code === "notion_401") throw error; }
   await db.prepare("UPDATE part_requests_recipients SET name=?,name_checked=1 WHERE installation_id=? AND notion_user_id=?").bind(name.slice(0, 200), installationId, nameless.id).run();
   return true;
 }
+
+const readsDatabase = (step: string) => step === "idle" || step === "schema" || step === "requests";
 
 /** The scheduled job. Returns `{ more: true }` when it stopped with work left, so the scheduler runs it again within seconds. */
 export async function refreshRecipients(context: JobContext): Promise<unknown> {
@@ -109,12 +130,13 @@ export async function refreshRecipients(context: JobContext): Promise<unknown> {
   }
   const steps = context.scheduler?.steps === true;
   let current = connection;
+  let step = refresh.step;
   try {
     for (let run = 0; run < (steps ? 1 : cronSlices); run++) {
-      const step = refresh.step;
+      step = refresh.step;
       const more = await slice(db, refresh, connection, schema, client, now);
-      // Every step but names made a Notion call that worked. A name lookup can fail for one person and says nothing about access.
-      if (step !== "names" && current.rejectionCode) { await clearRefusal(db, current); current = { ...current, rejectionCode: null, rejectedMs: null }; }
+      // Only reading the database says the database can be reached. Listing users and looking up one name say nothing about it.
+      if (readsDatabase(step) && current.rejectionCode) { await clearRefusal(db, current); current = { ...current, rejectionCode: null, rejectedMs: null }; }
       if (!more) return { done: true };
       const next = await db.prepare("SELECT step,cursor,pages,next_due_ms AS nextDue FROM part_requests_recipient_refresh WHERE installation_id=?").bind(installationId).first<Refresh>();
       if (!next) return { done: true };
@@ -124,7 +146,8 @@ export async function refreshRecipients(context: JobContext): Promise<unknown> {
     // Only codes reach the record. Wait for the next try rather than asking the scheduler to repeat a failure.
     if (!(error instanceof AppError)) throw error;
     await finishRun(db, now, error.code, refreshRetryMs);
-    await recordRefusal(db, current, error.code, now);
+    // A 401 is about the token, whichever call got it. A 403 or 404 only counts when the database itself refused.
+    if (error.code === "notion_401" || readsDatabase(step)) await recordRefusal(db, current, error.code, now);
     return { failed: error.code };
   }
   return { more: true, cursor: refresh.step };
