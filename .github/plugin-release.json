@@ -1,0 +1,9 @@
+{
+  "repository": "isriah/lancerlogin-part-requests",
+  "title": "LancerLogin Part Requests plugin",
+  "core": {
+    "repository": "isriah/LancerLogin",
+    "tag": "v2.1.0-beta.7",
+    "commit": "d9d1e101ffe34bbf066bea36d9c067311d1f108c"
+  }
+}

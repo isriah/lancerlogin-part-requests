@@ -1,0 +1,48 @@
+name: Release plugin
+# A canonical stable (vX.Y.Z) or beta (vX.Y.Z-beta.N) tag on a verified main commit prepares a draft GitHub release with
+# the notes in docs/releases/<tag>.md. A maintainer then publishes it with
+#   node scripts/plugin-release.mjs publish <tag> --publish
+# which rechecks everything and requires immutable releases, as LancerLogin Core's release publication does.
+# Nightly tags are created by nightly.yml and ignored here. The template repository itself never releases.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: plugin-release
+  cancel-in-progress: false
+
+jobs:
+  draft-release:
+    if: github.ref_type == 'tag' && !contains(github.ref_name, '-nightly.') && github.repository != 'isriah/lancerlogin-plugin-template'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.21.0
+      - name: Require a complete release candidate (version, notes, changelog, release commit)
+        run: node scripts/plugin-release.mjs check-tag "$RELEASE_TAG"
+      - name: Require successful Verify for this exact commit on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/plugin-release.mjs require-verify "$RELEASE_TAG"
+      - name: Prepare the draft release with its patch notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/plugin-release.mjs draft "$RELEASE_TAG"
+      - name: Explain the maintainer publication step
+        run: |
+          printf 'Draft %s is ready. Publish it with: node scripts/plugin-release.mjs publish %s --publish (from a checkout of this repository, with your GitHub CLI login). Nothing has been published by this workflow.\n' "$RELEASE_TAG" "$RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"

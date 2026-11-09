@@ -1,0 +1,67 @@
+name: Verify
+# Verifies this plugin commit composed into the LancerLogin Core commit pinned in .github/plugin-release.json.
+# Releases and nightly builds require a successful run of this workflow for their exact commit on main.
+#
+# The pinned Core is the public isriah/LancerLogin repository and its official plugins are public, so no repository
+# secret is needed. Two optional secrets exist only for a Core pin that is private:
+#   LANCERLOGIN_CORE_TOKEN    Contents: read on a private Core repository. Used for the Core checkout when set.
+#   LANCERLOGIN_PLUGIN_TOKEN  read access to private plugin repositories that Core composes. Used when set.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: docker://rhysd/actionlint:1.7.12
+        with:
+          args: -color
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out this plugin commit
+        uses: actions/checkout@v7
+        with:
+          path: plugin
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.21.0
+      - name: Check the lockfile
+        working-directory: plugin
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Run the plugin's unit tests
+        working-directory: plugin
+        run: npm test
+      - name: Read the pinned Core commit
+        id: core
+        run: node plugin/scripts/verify-with-core.mjs core-pin >> "$GITHUB_OUTPUT"
+      - name: Check out the pinned LancerLogin Core commit ${{ steps.core.outputs.tag }}
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ steps.core.outputs.repository }}
+          ref: ${{ steps.core.outputs.commit }}
+          token: ${{ secrets.LANCERLOGIN_CORE_TOKEN || github.token }}
+          path: core
+          persist-credentials: false
+      - name: Install Core dependencies
+        working-directory: core
+        run: npm ci --no-audit
+      - name: Compose this plugin commit into the pinned Core, then typecheck and build it
+        env:
+          LANCERLOGIN_PLUGIN_TOKEN: ${{ secrets.LANCERLOGIN_PLUGIN_TOKEN }}
+        run: node plugin/scripts/verify-with-core.mjs --core core --mode acceptance

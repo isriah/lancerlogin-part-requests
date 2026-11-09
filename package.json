@@ -1,0 +1,31 @@
+{
+  "name": "lancerlogin-module-part-requests",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Part Requests for LancerLogin Modular: students pair a browser extension through Discord and send part requests through the plugin.",
+  "license": "Apache-2.0",
+  "scripts": {
+    "test": "node --test \"tests/*.test.mjs\" && node --experimental-strip-types --disable-warning=ExperimentalWarning --test \"tests/*.test.ts\"",
+    "verify:core": "node scripts/verify-with-core.mjs --core"
+  },
+  "lancerlogin": {
+    "moduleId": "part-requests",
+    "contract": 1,
+    "core": ">=2.1.0-beta.7 <3.0.0",
+    "tablePrefix": "part_requests_",
+    "entries": {
+      "manifest": "./src/manifest.ts",
+      "api": "./src/api.ts"
+    },
+    "migrations": "./migrations",
+    "adoptedCoreMigrations": []
+  },
+  "peerDependencies": {
+    "@lancerlogin/module-sdk": "^1.6.0",
+    "react": "^19.1.1"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

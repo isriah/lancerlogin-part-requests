@@ -1,0 +1,57 @@
+name: Nightly plugin build
+# Publishes a testing-only prerelease vX.Y.Z-nightly.YYYYMMDD from main once a day, only when main has commits that are
+# not yet in any release and Verify passed for that exact commit. Nightly builds are never offered to the Stable or Beta
+# tracks; they are for test installations only. The template repository itself never publishes: the job runs only in a
+# repository created from it.
+on:
+  schedule:
+    - cron: "37 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: plugin-nightly
+  cancel-in-progress: false
+
+jobs:
+  nightly:
+    if: github.ref == 'refs/heads/main' && github.repository != 'isriah/lancerlogin-plugin-template'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Check out main with its tags
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.21.0
+      - name: Decide whether main has new verified commits
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/plugin-release.mjs nightly-plan | tee -a "$GITHUB_OUTPUT"
+      - name: Explain why nothing was published
+        if: steps.plan.outputs.publish != 'true'
+        env:
+          REASON: ${{ steps.plan.outputs.reason }}
+        run: |
+          printf 'No nightly build was published: %s\n' "$REASON" >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish the testing-only nightly prerelease
+        if: steps.plan.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NIGHTLY_TAG: ${{ steps.plan.outputs.tag }}
+          NIGHTLY_SHA: ${{ steps.plan.outputs.sha }}
+          PREVIOUS_TAG: ${{ steps.plan.outputs.previous }}
+          VERIFY_RUN: ${{ steps.plan.outputs.run }}
+        run: |
+          node scripts/plugin-release.mjs nightly-publish "$NIGHTLY_TAG" "$NIGHTLY_SHA" "$PREVIOUS_TAG" "$VERIFY_RUN" | tee -a "$GITHUB_OUTPUT"
+          printf 'Published testing-only nightly %s from %s.\n' "$NIGHTLY_TAG" "$NIGHTLY_SHA" >> "$GITHUB_STEP_SUMMARY"
