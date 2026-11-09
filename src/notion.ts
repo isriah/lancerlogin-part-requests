@@ -30,7 +30,7 @@ export type Person = { readonly id: string; readonly name: string };
 export type Choice = { readonly id: string; readonly name: string };
 export type PropertyMapping = { readonly id: string; readonly type: string; readonly options?: readonly Choice[] };
 export type Field = "description" | "status" | "vendor" | "team" | "recipient" | "sku" | "url" | "quantity" | "price" | "total";
-export type Schema = { readonly dataSourceId: string; readonly databaseId: string; readonly properties: Readonly<Record<Field, PropertyMapping>> };
+export type Schema = { readonly dataSourceId: string; readonly dataSourceName?: string; readonly databaseId: string; readonly properties: Readonly<Record<Field, PropertyMapping>> };
 export type RequestDraft = {
   readonly description: string; readonly status: string; readonly url: string; readonly sku: string; readonly team: string;
   readonly recipient: string; readonly quantity: number | null; readonly price: number | null; readonly currencyConfirmed: boolean;
@@ -72,8 +72,14 @@ export function notionId(input: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-/** Match a data source's properties to the expected layout. `previous` keeps a field mapped across a rename in Notion. */
-export function mapSchema(source: Json, databaseId: string, previous?: Schema): Schema {
+/** A data source's own title, which is rich text. The database lists the same name, and either may be missing. */
+const sourceTitle = (source: Json): string => Array.isArray(source.title) ? source.title.map((part: Json) => String(part?.plain_text ?? "")).join("") : "";
+
+/**
+ * Match a data source's properties to the expected layout. `previous` keeps a field mapped across a rename in Notion, and
+ * `listedName` is the name the database gave this data source, for the Admin pages.
+ */
+export function mapSchema(source: Json, databaseId: string, previous?: Schema, listedName?: string): Schema {
   const properties = {} as Record<Field, PropertyMapping>;
   const values = Object.values(source.properties ?? {}) as Json[];
   for (const [field, expected] of Object.entries(fields) as [Field, (typeof fields)[Field]][]) {
@@ -87,7 +93,8 @@ export function mapSchema(source: Json, databaseId: string, previous?: Schema): 
   const missing = vendors.filter((vendor) => !properties.vendor.options?.some((option) => option.name === vendor.label));
   if (missing.length) throw new AppError(`Vendor options missing from Notion: ${missing.map((vendor) => vendor.label).join(", ")}. Select the team's ordering database with all ${vendors.length} vendor options.`, "schema");
   if (!properties.team.options?.length) throw new AppError("The Team property needs at least one existing option.", "schema");
-  return { dataSourceId: String(source.id), databaseId, properties };
+  const name = (listedName || sourceTitle(source) || previous?.dataSourceName || "").trim().slice(0, 200);
+  return { dataSourceId: String(source.id), ...(name ? { dataSourceName: name } : {}), databaseId, properties };
 }
 
 const draftKeys = new Set(["description", "status", "url", "sku", "team", "recipient", "quantity", "price", "currencyConfirmed"]);
@@ -206,12 +213,12 @@ export class NotionClient {
     const { databaseId, dataSources } = await this.dataSources(databaseRef);
     const selected = dataSourceId ? dataSources.find((source) => source.id === dataSourceId) : dataSources.length === 1 ? dataSources[0] : undefined;
     if (!selected) throw new AppError("This database has multiple data sources. Select the ordering data source.", "data_source_required", false, { dataSources });
-    return this.readSchema(selected.id, databaseId, previous);
+    return this.readSchema(selected.id, databaseId, previous, selected.name);
   }
 
-  async readSchema(dataSourceId: string, databaseId: string, previous?: Schema): Promise<Schema> {
+  async readSchema(dataSourceId: string, databaseId: string, previous?: Schema, listedName?: string): Promise<Schema> {
     const source = await this.#request(`/data_sources/${dataSourceId}`);
-    return mapSchema(source, databaseId, previous?.dataSourceId === source.id ? previous : undefined);
+    return mapSchema(source, databaseId, previous?.dataSourceId === source.id ? previous : undefined, listedName);
   }
 
   /** One page of workspace members. Bots are left out. */

@@ -1,23 +1,28 @@
-// Data for the Admin page, which is a later phase: the request log and paired devices, with revoke and a manual refresh.
+// Data for the Admin pages: the request log and paired devices, with revoke and a manual refresh.
 // Core lets assigned Operators reach /admin/part-requests, because it requires a capability marked for Operators. Every
 // handler here still requires an Admin, so that capability grants nothing.
 import { requireAdmin, type AdminRouteContext } from "./connection.ts";
 import { json, object, refuse } from "./http.ts";
-import { installationId, type Database } from "./pairing.ts";
+import { installationId, maximumDevicesPerMember, type Database } from "./pairing.ts";
 import { pendingLimitMs } from "./requests.ts";
 
 const pageSize = (value: string | null) => Math.min(100, Math.max(1, Number.parseInt(value ?? "", 10) || 50));
 
-/** GET /requests?limit=&before=: newest first. `before` is the `nextBefore` of the previous page. */
+/** GET /requests?limit=&before=: newest first. `before` is the `nextBefore` of the previous page. `uncertainCount` covers the whole log. */
 async function requestLog(context: AdminRouteContext, db: Database, now: number) {
   const limit = pageSize(context.url.searchParams.get("limit"));
   const before = Number(context.url.searchParams.get("before"));
-  const rows = (await db.prepare(`SELECT id,member_name AS memberName,device_label AS deviceLabel,device_id AS deviceId,state,vendor_label AS vendor,description,status_name AS status,team_name AS team,
+  const [rows, uncertain] = await Promise.all([
+    db.prepare(`SELECT id,member_name AS memberName,device_label AS deviceLabel,device_id AS deviceId,state,vendor_label AS vendor,description,status_name AS status,team_name AS team,
       recipient_name AS recipient,sku,url,quantity,price,page_url AS pageUrl,failure_code AS failureCode,failure_message AS failureMessage,created_ms AS createdMs,finished_ms AS finishedMs
     FROM part_requests_submissions WHERE installation_id=? AND created_ms<? ORDER BY created_ms DESC,id LIMIT ?`)
-    .bind(installationId, Number.isSafeInteger(before) && before > 0 ? before : Number.MAX_SAFE_INTEGER, limit + 1).all<{ state: string; createdMs: number } & Record<string, unknown>>()).results ?? [];
+      .bind(installationId, Number.isSafeInteger(before) && before > 0 ? before : Number.MAX_SAFE_INTEGER, limit + 1).all<{ state: string; createdMs: number } & Record<string, unknown>>().then((result) => result.results ?? []),
+    // A pending row past its time limit reads as uncertain, the same as in the page below.
+    db.prepare("SELECT COUNT(*) AS count FROM part_requests_submissions WHERE installation_id=? AND (state='uncertain' OR state='pending' AND created_ms<=?)")
+      .bind(installationId, now - pendingLimitMs).first<{ count: number }>(),
+  ]);
   const page = rows.slice(0, limit).map((row) => row.state === "pending" && now - row.createdMs >= pendingLimitMs ? { ...row, state: "uncertain" } : row);
-  return json({ requests: page, nextBefore: rows.length > limit ? page.at(-1)?.createdMs ?? null : null });
+  return json({ requests: page, nextBefore: rows.length > limit ? page.at(-1)?.createdMs ?? null : null, uncertainCount: Number(uncertain?.count ?? 0) });
 }
 
 /** GET /devices: every paired device, revoked ones included, with no key material. */
@@ -25,7 +30,7 @@ async function devices(db: Database) {
   const rows = (await db.prepare(`SELECT d.id,d.label,d.member_id AS memberId,m.first_name AS firstName,m.last_name AS lastName,m.active AS memberActive,d.created_ms AS createdMs,d.last_used_ms AS lastUsedMs,d.revoked_ms AS revokedMs
     FROM part_requests_devices d JOIN members m ON m.installation_id=d.installation_id AND m.id=d.member_id WHERE d.installation_id=? ORDER BY d.revoked_ms IS NOT NULL,m.last_name COLLATE NOCASE,m.first_name COLLATE NOCASE,d.created_ms`)
     .bind(installationId).all<{ id: string; label: string; memberId: string; firstName: string; lastName: string; memberActive: number; createdMs: number; lastUsedMs: number | null; revokedMs: number | null }>()).results ?? [];
-  return json({ devices: rows.map(({ firstName, lastName, memberActive, ...row }) => ({ ...row, memberName: `${firstName} ${lastName}`.trim(), memberActive: memberActive === 1 })) });
+  return json({ limitPerMember: maximumDevicesPerMember, devices: rows.map(({ firstName, lastName, memberActive, ...row }) => ({ ...row, memberName: `${firstName} ${lastName}`.trim(), memberActive: memberActive === 1 })) });
 }
 
 /** POST /devices/revoke: { deviceId }. Ends that device's access at once. Its log entries stay. */

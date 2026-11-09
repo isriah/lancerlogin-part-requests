@@ -2,11 +2,22 @@
 
 Students click a browser extension on a vendor's product page, review the details and create a request in the team's Notion ordering database. LancerLogin holds the Notion token. Students never sign in to LancerLogin.
 
-**Status: Phase 1.** The backend is built: pairing, the Notion connection, the device API, the request log and the recipient job. There are no dashboard pages yet, so setup can only be driven through these routes.
+**Status: Phase 2.** The backend and the Admin pages are built: pairing, the Notion connection, the device API, the request log, the recipient job, Core's setup screen and **Settings > Modules > Part Requests**. The browser extension's pairing and sending are a later phase.
 
 | Plugin | LancerLogin Core | Module SDK | Module contract |
 | --- | --- | --- | --- |
 | 0.1.x | `>=2.1.0-beta.7 <3.0.0` | `^1.6.0` | 1 |
+
+## Admin pages
+
+**Settings > Modules > Part Requests**, Admin only, has four sections:
+
+- **Setup:** the connection and its token, with Replace and Remove, and a link to Core's setup screen. Core shows that screen by itself until setup is complete. One Verify button saves the token and checks the database together.
+- **Requests log:** every request with its member and device, newest first, with a banner when any result is uncertain.
+- **Paired devices:** grouped by member, with Revoke. It also shows a member at the limit of 5 and a member who left the active roster.
+- **Status:** the connection, the recipient list with Refresh now, and whether pairing is paused.
+
+Core keeps a module open once its setup is complete, so replacing or removing the token later stops requests without closing these pages.
 
 ## Setup (Admin)
 
@@ -14,7 +25,8 @@ Core refuses `/admin/<module>` until a module's setup is complete, so setup uses
 
 | Route | Body | Result |
 | --- | --- | --- |
-| `GET /status` | | What is saved and what is missing. Says whether a token is saved, never the token. |
+| `GET /status` | | What is saved and what is missing. Says whether a token is saved, never the token. Also `dataSourceName`, `pairingPausedUntilMs` (the shared pause, `null` when pairing is open), `pairedDevices` and `deviceLimit`. |
+| `POST /verify` | `{ token?, databaseUrl, dataSourceId? }` | What the setup page's Verify button calls. Checks the token and the database, then saves both together, so a failed check saves nothing. The exception is `409 data_source_required`, which lists the choices and keeps the token, because it has already proved itself. Leave out `token` to use the saved one. Refusals are the same as `PUT /token` and `POST /connection`. |
 | `PUT /token` | `{ token }` | Checks the token with Notion, encrypts and saves it, and saves the dashboard address as the site address. A replaced token must be verified again with `POST /connection`. |
 | `DELETE /token` | | Removes the token. Requests stop. |
 | `POST /database` | `{ databaseUrl }` | `{ databaseId, dataSources }`. Accepts `notion.so`, `notion.com` and `notion.site` links, or a bare ID. |
@@ -79,8 +91,8 @@ Under `/admin/part-requests`, Admin only. Core requires a capability marked for 
 
 | Route | Result |
 | --- | --- |
-| `GET /requests?limit=&before=` | `{ requests, nextBefore }`, newest first. Each shows the member, device, state and request details. |
-| `GET /devices` | `{ devices }`: label, member, created, last used and revoked. No key material. |
+| `GET /requests?limit=&before=` | `{ requests, nextBefore, uncertainCount }`, newest first. Each shows the member, device, state and request details. `uncertainCount` covers the whole log, not just this page. |
+| `GET /devices` | `{ devices, limitPerMember }`: label, member, created, last used and revoked. No key material. |
 | `POST /devices/revoke` | `{ deviceId }` ends that device's access at once. |
 | `POST /recipients/refresh` | Runs the recipient refresh now. |
 

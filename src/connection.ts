@@ -5,7 +5,7 @@
 // setup completes. Core keeps /module-setup open to Admins afterwards, so the token can be replaced later or after a restore.
 import { AppError, NotionClient, type Choice, type Schema } from "./notion.ts";
 import { object, refuse, json } from "./http.ts";
-import { installationId, type Database, type Statement } from "./pairing.ts";
+import { installationId, maximumDevicesPerMember, type Database, type Statement } from "./pairing.ts";
 
 export type Credentials = {
   readonly available: boolean;
@@ -80,27 +80,41 @@ const notionFailure = (error: unknown) => {
 };
 
 const validToken = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9_-]{20,1000}$/.test(value.trim());
+const invalidToken = () => refuse(400, "invalid_token", "Enter the connection's Notion token.");
+const credentialsUnavailable = () => refuse(503, "credentials_unavailable", "Credential encryption is unavailable on this installation.");
+const siteUnknown = () => refuse(409, "site_address_unknown", "The dashboard address of this installation is unknown.");
+const usableSite = (site: string | undefined): site is string => Boolean(site) && site!.length <= 200;
+
+/** A new token is unproven against the saved database until the connection is checked again. */
+const tokenStatements = (db: Database, encrypted: { ciphertext: string; iv: string }, site: string, actor: string, now: number): Statement[] => [
+  db.prepare(`INSERT INTO part_requests_notion(installation_id,ciphertext,iv,address_salt,updated_ms) VALUES (?,?,?,?,?)
+    ON CONFLICT(installation_id) DO UPDATE SET ciphertext=excluded.ciphertext,iv=excluded.iv,verified_ms=NULL,updated_ms=excluded.updated_ms`)
+    .bind(installationId, encrypted.ciphertext, encrypted.iv, randomHex(), now),
+  db.prepare("INSERT INTO part_requests_settings(installation_id,site_address,updated_ms) VALUES (?,?,?) ON CONFLICT(installation_id) DO UPDATE SET site_address=excluded.site_address,updated_ms=excluded.updated_ms")
+    .bind(installationId, site, now),
+  audit(db, actor, "part_requests.token_saved", now),
+];
+
+const connectionStatements = (db: Database, schema: Schema, actor: string, now: number): Statement[] => [
+  db.prepare("UPDATE part_requests_notion SET database_id=?,data_source_id=?,schema_json=?,verified_ms=?,schema_error=NULL,updated_ms=? WHERE installation_id=?")
+    .bind(schema.databaseId, schema.dataSourceId, JSON.stringify(schema), now, now, installationId),
+  // Have the refresh job start from the top on its next run; this write also pokes it.
+  db.prepare(`INSERT INTO part_requests_recipient_refresh(installation_id,step,next_due_ms) VALUES (?,'idle',0)
+    ON CONFLICT(installation_id) DO UPDATE SET step='idle',cursor=NULL,pages=0,next_due_ms=0`).bind(installationId),
+  audit(db, actor, "part_requests.connection_verified", now),
+];
 
 async function saveToken(context: AdminRouteContext, db: Database, actor: string, now: number) {
   const input = object(await context.json(4096));
-  if (Object.keys(input).some((key) => key !== "token") || !validToken(input.token)) return refuse(400, "invalid_token", "Enter the connection's Notion token.");
+  if (Object.keys(input).some((key) => key !== "token") || !validToken(input.token)) return invalidToken();
   const { credentials } = context.services;
-  if (!credentials.available) return refuse(503, "credentials_unavailable", "Credential encryption is unavailable on this installation.");
+  if (!credentials.available) return credentialsUnavailable();
   const site = context.dashboardOrigin;
-  if (!site || site.length > 200) return refuse(409, "site_address_unknown", "The dashboard address of this installation is unknown.");
+  if (!usableSite(site)) return siteUnknown();
   const token = input.token.trim();
   try { await new NotionClient(token).verifyToken(); } catch (error) { return notionFailure(error); }
-  const encrypted = await credentials.encrypt({ token });
-  // A new token is unproven against the saved database until the connection is checked again.
-  await db.batch([
-    db.prepare(`INSERT INTO part_requests_notion(installation_id,ciphertext,iv,address_salt,updated_ms) VALUES (?,?,?,?,?)
-      ON CONFLICT(installation_id) DO UPDATE SET ciphertext=excluded.ciphertext,iv=excluded.iv,verified_ms=NULL,updated_ms=excluded.updated_ms`)
-      .bind(installationId, encrypted.ciphertext, encrypted.iv, randomHex(), now),
-    db.prepare("INSERT INTO part_requests_settings(installation_id,site_address,updated_ms) VALUES (?,?,?) ON CONFLICT(installation_id) DO UPDATE SET site_address=excluded.site_address,updated_ms=excluded.updated_ms")
-      .bind(installationId, site, now),
-    audit(db, actor, "part_requests.token_saved", now),
-  ]);
-  return status(context, db);
+  await db.batch(tokenStatements(db, await credentials.encrypt({ token }), site, actor, now));
+  return status(context, db, now);
 }
 
 async function listDataSources(context: AdminRouteContext, db: Database) {
@@ -117,15 +131,37 @@ async function connect(context: AdminRouteContext, db: Database, actor: string, 
   let schema: Schema;
   try { schema = await new NotionClient(await savedToken(row, context.services.credentials)).connect(input.databaseUrl, input.dataSourceId as string | undefined, parseSchema(row)); }
   catch (error) { return notionFailure(error); }
-  await db.batch([
-    db.prepare("UPDATE part_requests_notion SET database_id=?,data_source_id=?,schema_json=?,verified_ms=?,schema_error=NULL,updated_ms=? WHERE installation_id=?")
-      .bind(schema.databaseId, schema.dataSourceId, JSON.stringify(schema), now, now, installationId),
-    // Have the refresh job start from the top on its next run; this write also pokes it.
-    db.prepare(`INSERT INTO part_requests_recipient_refresh(installation_id,step,next_due_ms) VALUES (?,'idle',0)
-      ON CONFLICT(installation_id) DO UPDATE SET step='idle',cursor=NULL,pages=0,next_due_ms=0`).bind(installationId),
-    audit(db, actor, "part_requests.connection_verified", now),
-  ]);
-  return status(context, db);
+  await db.batch(connectionStatements(db, schema, actor, now));
+  return status(context, db, now);
+}
+
+/**
+ * POST /verify: { token?, databaseUrl, dataSourceId? }. The setup page's one Verify button. With a token it checks the token
+ * and the database first and saves both together, so a failed check leaves nothing behind. The one exception is a database
+ * that needs a data source chosen: the token has proved itself by then, so it is saved and the page only asks for the choice.
+ */
+async function verify(context: AdminRouteContext, db: Database, actor: string, now: number) {
+  const input = object(await context.json(4096));
+  if (Object.keys(input).some((key) => key !== "token" && key !== "databaseUrl" && key !== "dataSourceId")) return refuse(400, "validation", "Send the token, the database link and the data source only.");
+  if (input.token !== undefined && !validToken(input.token)) return invalidToken();
+  if (typeof input.databaseUrl !== "string" || !input.databaseUrl.trim() || input.databaseUrl.length > 2000 || input.dataSourceId !== undefined && typeof input.dataSourceId !== "string") return refuse(400, "invalid_link", "Enter the database's Notion link.");
+  const { credentials } = context.services;
+  const newToken = typeof input.token === "string" ? input.token.trim() : undefined;
+  if (newToken && !credentials.available) return credentialsUnavailable();
+  const site = context.dashboardOrigin;
+  if (newToken && !usableSite(site)) return siteUnknown();
+  const row = await readConnection(db);
+  const saveNewToken = async () => newToken ? tokenStatements(db, await credentials.encrypt({ token: newToken }), site as string, actor, now) : [];
+  try {
+    const client = new NotionClient(newToken ?? await savedToken(row, credentials));
+    if (newToken) await client.verifyToken();
+    const schema = await client.connect(input.databaseUrl, input.dataSourceId as string | undefined, parseSchema(row));
+    await db.batch([...await saveNewToken(), ...connectionStatements(db, schema, actor, now)]);
+  } catch (error) {
+    if (error instanceof AppError && error.code === "data_source_required" && newToken) await db.batch(await saveNewToken());
+    return notionFailure(error);
+  }
+  return status(context, db, now);
 }
 
 async function disconnect(context: AdminRouteContext, db: Database, actor: string, now: number) {
@@ -133,26 +169,32 @@ async function disconnect(context: AdminRouteContext, db: Database, actor: strin
     db.prepare("UPDATE part_requests_notion SET ciphertext=NULL,iv=NULL,verified_ms=NULL,updated_ms=? WHERE installation_id=?").bind(now, installationId),
     audit(db, actor, "part_requests.token_removed", now),
   ]);
-  return status(context, db);
+  return status(context, db, now);
 }
 
 /** What the setup page shows. Whether a token is saved, never the token or its ciphertext. */
-async function status(context: AdminRouteContext, db: Database) {
-  const [row, settings, recipients, refresh, addresses] = await Promise.all([
+async function status(context: AdminRouteContext, db: Database, now: number) {
+  const [row, settings, recipients, refresh, addresses, pairing, paired] = await Promise.all([
     readConnection(db),
     db.prepare("SELECT site_address AS siteAddress FROM part_requests_settings WHERE installation_id=?").bind(installationId).first<{ siteAddress: string }>(),
     db.prepare("SELECT COUNT(*) AS count FROM part_requests_recipients WHERE installation_id=?").bind(installationId).first<{ count: number }>(),
     db.prepare("SELECT step,finished_ms AS finishedMs,last_error AS lastError FROM part_requests_recipient_refresh WHERE installation_id=?").bind(installationId).first<{ step: string; finishedMs: number | null; lastError: string | null }>(),
     db.prepare("SELECT COUNT(*) AS count FROM part_requests_pairing_address_limits WHERE installation_id=?").bind(installationId).first<{ count: number }>(),
+    db.prepare("SELECT paused_until_ms AS pausedUntil FROM part_requests_pairing_limits WHERE installation_id=?").bind(installationId).first<{ pausedUntil: number }>(),
+    db.prepare("SELECT COUNT(*) AS count FROM part_requests_devices WHERE installation_id=? AND revoked_ms IS NULL").bind(installationId).first<{ count: number }>(),
   ]);
+  const pausedUntil = Number(pairing?.pausedUntil ?? 0);
   const schema = parseSchema(row);
   return json({
     tokenSaved: Boolean(row?.ciphertext), canSaveToken: context.services.credentials.available, siteAddress: settings?.siteAddress ?? null,
-    databaseId: row?.databaseId ?? null, dataSourceId: row?.dataSourceId ?? null, verifiedMs: row?.verifiedMs ?? null, schemaError: row?.schemaError ?? null,
+    databaseId: row?.databaseId ?? null, dataSourceId: row?.dataSourceId ?? null, dataSourceName: schema?.dataSourceName ?? null, verifiedMs: row?.verifiedMs ?? null, schemaError: row?.schemaError ?? null,
     problem: connectionProblem(row)?.code ?? null, teams: schema?.properties.team.options ?? [],
     recipients: Number(recipients?.count ?? 0), refresh: refresh ?? null,
     // Above zero means real client addresses reach the pairing route, so wrong PINs are being counted per address.
     pairingAddressesCounted: Number(addresses?.count ?? 0),
+    // The shared pause, which stops pairing for everyone. Null when pairing is open.
+    pairingPausedUntilMs: pausedUntil > now ? pausedUntil : null,
+    pairedDevices: Number(paired?.count ?? 0), deviceLimit: maximumDevicesPerMember,
   });
 }
 
@@ -160,11 +202,12 @@ async function status(context: AdminRouteContext, db: Database) {
 export async function setupRoute(context: AdminRouteContext): Promise<Response | undefined> {
   const path = context.url.pathname.slice("/module-setup/part-requests".length);
   const method = context.request.method;
-  const known = path === "/status" && method === "GET" || path === "/token" && (method === "PUT" || method === "DELETE") || (path === "/database" || path === "/connection") && method === "POST";
+  const known = path === "/status" && method === "GET" || path === "/token" && (method === "PUT" || method === "DELETE") || (path === "/database" || path === "/connection" || path === "/verify") && method === "POST";
   if (!known) return undefined;
   const { userId } = await requireAdmin(context);
   const db = context.db as Database; const now = Date.now();
-  if (path === "/status") return status(context, db);
+  if (path === "/status") return status(context, db, now);
   if (path === "/token") return method === "PUT" ? saveToken(context, db, userId, now) : disconnect(context, db, userId, now);
+  if (path === "/verify") return verify(context, db, userId, now);
   return path === "/database" ? listDataSources(context, db) : connect(context, db, userId, now);
 }

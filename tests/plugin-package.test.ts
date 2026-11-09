@@ -24,15 +24,16 @@ test("package.json, the manifest and plugin-release.json agree", () => {
   assert.match(release.core.commit, /^[0-9a-f]{40}$/);
 });
 
-test("the route families are declared, and there are no pages yet", () => {
+test("the route families and the one Admin settings page are declared", () => {
   assert.deepEqual(manifest.apiRoutes, [
     { path: "/public/part-requests", match: "prefix", access: "service" },
     { path: "/admin/part-requests", match: "prefix", access: "workspace" },
     { path: "/module-setup/part-requests", match: "prefix", access: "setup" },
   ]);
   assert.deepEqual(manifest.navigation, []);
-  assert.deepEqual(manifest.settings, []);
-  assert.equal(pkg.lancerlogin.entries.dashboard, undefined);
+  assert.deepEqual(manifest.settings, [{ label: "Part Requests", path: "/settings/part-requests" }]);
+  assert.equal(pkg.lancerlogin.entries.dashboard, "./src/dashboard.tsx");
+  assert.equal(manifest.setup.version, 1, "Core cannot update an installed module's setup version, so raising it locks setup");
 });
 
 test("every table is prefixed, declared and classified for backup and cleanup", () => {

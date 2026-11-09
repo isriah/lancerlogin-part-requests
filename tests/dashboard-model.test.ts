@@ -1,0 +1,75 @@
+// What the Admin pages show for each state. The pages themselves are driven in a real browser against a local preview.
+import test from "node:test";
+import assert from "node:assert/strict";
+import {
+  connectionProblem, databaseLink, formatDate, formatDateTime, formatShortDate, formatTime, groupDevices, notionPageLink, pairingNotice, refreshNotice, requestRow, revokeMessage, uncertainBanner, uncertainNote, type Device,
+} from "../src/dashboard/part-requests-model.ts";
+
+const zone = "America/Los_Angeles";
+const at = Date.UTC(2026, 10, 8, 22, 14);
+const databaseId = "11111111-2222-4333-8444-555555555555";
+
+test("dates read as the approved pages show them", () => {
+  assert.equal(formatDateTime(at, zone), "Nov 8, 2:14 PM");
+  assert.equal(formatDate(at, zone), "Nov 8, 2026");
+  assert.equal(formatShortDate(at, zone), "Nov 8");
+  assert.equal(formatTime(at, zone), "2:14 PM");
+});
+
+test("request rows: each state has its pill, note and link", () => {
+  assert.deepEqual(requestRow({ state: "created", pageUrl: "https://app.notion.com/p/abc", failureMessage: null }, databaseId), { badge: { label: "Created", tone: "success" }, link: { href: "https://app.notion.com/p/abc", label: "Open page" } });
+  assert.deepEqual(requestRow({ state: "uncertain", pageUrl: null, failureMessage: null }, databaseId), { badge: { label: "Uncertain", tone: "warning" }, note: uncertainNote, link: { href: databaseLink(databaseId), label: "Check database" } });
+  assert.equal(requestRow({ state: "uncertain", pageUrl: null, failureMessage: null }, null).link, undefined);
+  assert.deepEqual(requestRow({ state: "failed", pageUrl: null, failureMessage: "Notion said no." }, databaseId), { badge: { label: "Failed", tone: "error" }, note: "Nothing was created. Notion said no." });
+  assert.deepEqual(requestRow({ state: "pending", pageUrl: null, failureMessage: null }, databaseId), { badge: { label: "Pending", tone: "neutral" } });
+});
+
+test("only https links on Notion's own hosts are offered", () => {
+  assert.equal(databaseLink(databaseId), "https://app.notion.com/p/11111111222243338444555555555555");
+  assert.equal(notionPageLink("https://www.notion.so/x"), "https://www.notion.so/x");
+  for (const bad of [null, "", "not a link", "http://app.notion.com/p/x", "javascript:alert(1)", "https://notion.so.example.test/x", "https://evilnotion.so/x"]) assert.equal(notionPageLink(bad), undefined, String(bad));
+});
+
+test("the uncertain banner counts, and is absent at zero", () => {
+  assert.equal(uncertainBanner(0), undefined);
+  assert.match(uncertainBanner(1)!, /^1 request has an uncertain result\. Notion may or may not have created it\./);
+  assert.match(uncertainBanner(3)!, /^3 requests have uncertain results\. Notion may or may not have created them\./);
+});
+
+const device = (id: string, memberId: string, memberName: string, overrides: Partial<Device> = {}): Device => ({ id, label: `Laptop ${id}`, memberId, memberName, memberActive: true, createdMs: Number(id), lastUsedMs: null, revokedMs: null, ...overrides });
+
+test("devices group by member, count working devices against the limit, and show the off-roster state", () => {
+  const groups = groupDevices([
+    device("1", "e", "Test Student E", { memberActive: false }),
+    device("9", "b", "Test Student B", { revokedMs: 5 }),
+    device("8", "b", "Test Student B"),
+    ...["2", "3", "4", "5", "6"].map((id) => device(id, "a", "Test Student A")),
+  ], 5);
+  assert.deepEqual(groups.map((group) => group.memberName), ["Test Student A", "Test Student B", "Test Student E"]);
+  assert.deepEqual(groups[0]!.badge, { label: "5 of 5 devices, at the limit", tone: "warning" });
+  assert.deepEqual(groups[1]!.badge, { label: "1 of 5 devices", tone: "neutral" });
+  assert.deepEqual(groups[1]!.devices.map((item) => item.id), ["8", "9"], "revoked devices come last");
+  assert.deepEqual(groups[2]!.badge, { label: "Not on the active roster, so this device has no access", tone: "neutral" });
+  assert.match(groupDevices([device("1", "e", "E", { memberActive: false }), device("2", "e", "E", { memberActive: false })], 5)[0]!.badge.label, /these devices have no access/);
+  assert.deepEqual(groupDevices([], 5), []);
+});
+
+test("the revoke message says what happens and how to undo it", () => {
+  assert.equal(revokeMessage({ label: "School Chromebook", memberName: "Test Student A" }), "Test Student A's School Chromebook loses access at once. Its past requests stay in the log. To use it again, Test Student A runs /ordering-pin and pairs it again.");
+});
+
+test("connection problems say what stopped and what to do", () => {
+  assert.equal(connectionProblem({ tokenSaved: true, problem: null, schemaError: null }), undefined);
+  assert.match(connectionProblem({ tokenSaved: true, problem: "notion_schema_changed", schemaError: 'Notion property "SKU" is wrong.' })!, /no longer matches.*"SKU" is wrong/);
+  assert.match(connectionProblem({ tokenSaved: false, problem: "notion_not_connected", schemaError: null })!, /^No Notion token is saved.*after a restore/);
+  assert.match(connectionProblem({ tokenSaved: true, problem: "notion_not_connected", schemaError: null })!, /has not been verified/);
+});
+
+test("pairing and refresh notices", () => {
+  assert.equal(pairingNotice(null), undefined);
+  assert.match(pairingNotice(at, zone)!, /reopens by itself at 2:14 PM\. Devices that are already paired keep working\./);
+  assert.equal(refreshNotice(null), undefined);
+  assert.equal(refreshNotice({ step: "idle", finishedMs: at, lastError: null }), undefined);
+  assert.match(refreshNotice({ step: "idle", finishedMs: at, lastError: "notion_500" }, zone)!, /could not finish.*The list from Nov 8, 2:14 PM is still in use/);
+  assert.doesNotMatch(refreshNotice({ step: "idle", finishedMs: null, lastError: "notion_500" }, zone)!, /still in use/);
+});

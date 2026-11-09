@@ -628,6 +628,169 @@ test("the job does nothing until connected, and prunes old counters and people a
   assert.equal(h.test.rows("SELECT * FROM part_requests_recipients WHERE notion_user_id='gone'").length, 0);
 });
 
+// ---- The setup page's Verify button
+
+const link = `https://app.notion.com/p/${databaseId.replaceAll("-", "")}`;
+const notionRow = () => h.test.rows<any>("SELECT * FROM part_requests_notion")[0];
+
+test("verify: one call saves the token and the connection together, and names the data source", async () => {
+  const done = await h.admin("POST", "/verify", { token: testToken, databaseUrl: link });
+  assert.equal(done.status, 200, done.text);
+  assert.equal(done.body.tokenSaved, true);
+  assert.equal(done.body.problem, null);
+  assert.equal(done.body.siteAddress, dashboard);
+  assert.equal(done.body.dataSourceName, "Ordering");
+  assert.equal((await h.admin("GET", "/status")).body.dataSourceName, "Ordering");
+  assert.equal(await api.setup.stepValid(h.db, "notion-connection"), true);
+  assert.ok(!done.text.includes(testToken));
+  assert.ok(!JSON.stringify(notionRow()).includes(testToken), "only ciphertext is stored");
+  const actions = h.test.rows<{ action: string }>("SELECT action FROM audit_log").map((row) => row.action);
+  assert.ok(actions.includes("part_requests.token_saved") && actions.includes("part_requests.connection_verified"));
+});
+
+test("verify: a failed check saves nothing, so nothing has to be undone", async () => {
+  stub.on(/\/users\/me$/, () => notionResponse({ code: "unauthorized" }, 401));
+  const rejected = await h.admin("POST", "/verify", { token: testToken, databaseUrl: link });
+  assert.equal(rejected.body.code, "notion_token_rejected");
+  assert.equal(notionRow(), undefined);
+  stub.restore(); stub = stubNotion();
+  stub.on(/\/databases\//, () => notionResponse({ code: "object_not_found" }, 404));
+  const unshared = await h.admin("POST", "/verify", { token: testToken, databaseUrl: link });
+  assert.equal(unshared.status, 422);
+  assert.equal(unshared.body.code, "notion_404");
+  assert.match(unshared.body.error, /Add the connection to the database/);
+  assert.equal(notionRow(), undefined);
+  assert.equal(h.test.rows("SELECT * FROM part_requests_settings").length, 0);
+  stub.restore(); stub = stubNotion();
+  stub.source = dataSource();
+  delete stub.source.properties.SKU;
+  const mismatch = await h.admin("POST", "/verify", { token: testToken, databaseUrl: link });
+  assert.equal(mismatch.body.code, "schema_mismatch");
+  assert.match(mismatch.body.error, /"SKU" must exist with type rich_text/);
+  assert.equal(notionRow(), undefined);
+  assert.equal(h.test.rows("SELECT * FROM audit_log").length, 0);
+});
+
+test("verify: several data sources save the proven token and ask for the choice, which then needs no token", async () => {
+  stub.dataSources = [{ id: dataSourceId, name: "Ordering" }, { id: otherDataSourceId, name: "Archive" }];
+  const asked = await h.admin("POST", "/verify", { token: testToken, databaseUrl: link });
+  assert.equal(asked.status, 409);
+  assert.equal(asked.body.code, "data_source_required");
+  assert.deepEqual(asked.body.dataSources.map((source: { name: string }) => source.name), ["Ordering", "Archive"]);
+  const waiting = await h.admin("GET", "/status");
+  assert.equal(waiting.body.tokenSaved, true);
+  assert.equal(waiting.body.problem, "notion_not_connected");
+  assert.equal(await api.setup.stepValid(h.db, "notion-connection"), false);
+  const chosen = await h.admin("POST", "/verify", { databaseUrl: link, dataSourceId: otherDataSourceId });
+  assert.equal(chosen.status, 200, chosen.text);
+  assert.equal(chosen.body.dataSourceName, "Archive");
+  assert.equal(chosen.body.dataSourceId, otherDataSourceId);
+});
+
+test("verify: bad input is refused, no token saved is a clear answer, and it is Admin only from the dashboard", async () => {
+  assert.equal((await h.admin("POST", "/verify", { token: "short", databaseUrl: link })).body.code, "invalid_token");
+  assert.equal((await h.admin("POST", "/verify", { token: testToken, databaseUrl: " " })).body.code, "invalid_link");
+  assert.equal((await h.admin("POST", "/verify", { token: testToken, databaseUrl: "https://notion.evil.example.test/p/x" })).body.code, "invalid_link");
+  assert.equal((await h.admin("POST", "/verify", { token: testToken, databaseUrl: link, extra: 1 })).status, 400);
+  assert.equal((await h.admin("POST", "/verify", { databaseUrl: link })).body.code, "notion_not_connected");
+  assert.equal(stub.calls.filter((call) => call.url.includes("/databases/")).length, 0, "no Notion call without a token");
+  const path = "/module-setup/part-requests/verify";
+  assert.equal((await h.call("POST", path, { role: "operator", origin: dashboard, body: { token: testToken, databaseUrl: link } })).status, 403);
+  assert.equal((await h.call("POST", path, { role: null, origin: dashboard, body: { token: testToken, databaseUrl: link } })).status, 401);
+  assert.equal((await h.call("POST", path, { origin: "https://elsewhere.example.test", body: { token: testToken, databaseUrl: link } })).status, 403);
+  assert.equal(notionRow(), undefined);
+  const unavailable = createHarness(api, { credentials: testCredentials(false) });
+  assert.equal((await unavailable.admin("POST", "/verify", { token: testToken, databaseUrl: link })).body.code, "credentials_unavailable");
+});
+
+test("status: replacing the token and removing it keep the data source's name and stop requests until verified again", async () => {
+  await h.connect();
+  const replaced = await h.admin("PUT", "/token", { token: testToken });
+  assert.equal(replaced.body.problem, "notion_not_connected");
+  assert.equal(replaced.body.dataSourceName, "Ordering");
+  assert.equal(replaced.body.databaseId, databaseId);
+  const again = await h.admin("POST", "/verify", { databaseUrl: link, dataSourceId: replaced.body.dataSourceId });
+  assert.equal(again.body.problem, null);
+  const removed = await h.admin("DELETE", "/token");
+  assert.equal(removed.body.tokenSaved, false);
+  assert.equal(removed.body.problem, "notion_not_connected");
+  assert.equal(removed.body.databaseId, databaseId);
+});
+
+test("status: the refresh job keeps the data source's name, and a connection saved before names were kept reads as null", async () => {
+  await h.connect();
+  await h.runJob();
+  assert.equal((await h.admin("GET", "/status")).body.dataSourceName, "Ordering");
+  const schema = JSON.parse(notionRow().schema_json);
+  delete schema.dataSourceName;
+  h.test.run("UPDATE part_requests_notion SET schema_json=?", JSON.stringify(schema));
+  assert.equal((await h.admin("GET", "/status")).body.dataSourceName, null);
+});
+
+test("status: reports the shared pairing pause and when it ends, then clears it by itself", async () => {
+  await h.connect();
+  const first = await h.admin("GET", "/status");
+  assert.equal(first.body.pairingPausedUntilMs, null);
+  assert.equal(first.body.pairedDevices, 0);
+  assert.equal(first.body.deviceLimit, 5);
+  const now = Date.now();
+  for (let index = 0; index < maximumWrongPins; index++) await exchangePin(h.db, "2222-2222", now);
+  const paused = await h.admin("GET", "/status");
+  assert.equal(paused.body.pairingPausedUntilMs, now + pairingPauseMs);
+  h.test.run("UPDATE part_requests_pairing_limits SET paused_until_ms=?", Date.now() - 1);
+  assert.equal((await h.admin("GET", "/status")).body.pairingPausedUntilMs, null);
+});
+
+test("status: one address's pause is not reported as pairing being paused for everyone", async () => {
+  await h.connect();
+  const now = Date.now();
+  for (let index = 0; index < maximumWrongPinsPerAddress; index++) await exchangePin(h.db, "2222-2222", now, { address: "203.0.113.9" });
+  assert.equal((await exchangePin(h.db, "2222-2222", now, { address: "203.0.113.9" })).status, 429);
+  assert.equal((await h.admin("GET", "/status")).body.pairingPausedUntilMs, null);
+});
+
+test("status: counts working devices, off-roster ones included, not revoked ones", async () => {
+  await h.connect();
+  await h.pair();
+  await h.pair(undefined, "Second");
+  await h.pair(discordB);
+  const devices = await h.call("GET", "/admin/part-requests/devices");
+  assert.equal(devices.body.limitPerMember, 5);
+  assert.equal((await h.call("POST", "/admin/part-requests/devices/revoke", { origin: dashboard, body: { deviceId: devices.body.devices[0].id } })).status, 200);
+  h.test.run("UPDATE members SET active=0 WHERE id='m-b'");
+  assert.equal((await h.admin("GET", "/status")).body.pairedDevices, 2);
+});
+
+test("the request log counts uncertain requests across every page, overdue pending ones included", async () => {
+  await ready();
+  const key = await h.pair(discordB);
+  stub.on(/\/pages$/, () => notionResponse({ message: "stub" }, 500));
+  for (const description of ["Test old uncertain", "Test newer uncertain"]) await send(key, uuid(), goodDraft({ description }));
+  stub.on(/\/pages$/, () => notionResponse({ message: "stub" }, 400));
+  await send(key, uuid(), goodDraft({ description: "Test failed" }));
+  h.test.run("UPDATE part_requests_submissions SET created_ms=created_ms-1000 WHERE description='Test newer uncertain'");
+  h.test.run("UPDATE part_requests_submissions SET created_ms=created_ms-2000 WHERE description='Test old uncertain'");
+  const onePage = await h.call("GET", "/admin/part-requests/requests?limit=1");
+  assert.equal(onePage.body.requests[0].description, "Test failed");
+  assert.equal(onePage.body.uncertainCount, 2, "both are older than this page");
+  h.test.run("UPDATE part_requests_submissions SET state='pending',finished_ms=NULL,created_ms=? WHERE description='Test failed'", Date.now());
+  assert.equal((await h.call("GET", "/admin/part-requests/requests")).body.uncertainCount, 2, "a request still inside its time limit is pending");
+  h.test.run("UPDATE part_requests_submissions SET created_ms=? WHERE description='Test failed'", Date.now() - pendingLimitMs - 1);
+  const overdue = await h.call("GET", "/admin/part-requests/requests");
+  assert.equal(overdue.body.uncertainCount, 3);
+  assert.equal(overdue.body.requests.filter((request: { state: string }) => request.state === "uncertain").length, 3);
+});
+
+test("query counts: status and the log are one batch of reads each", async () => {
+  await h.connect();
+  h.state.queries = 0;
+  assert.equal((await h.admin("GET", "/status")).status, 200);
+  assert.equal(h.state.queries, 1);
+  h.state.queries = 0;
+  assert.equal((await h.call("GET", "/admin/part-requests/requests")).status, 200);
+  assert.equal(h.state.queries, 1);
+});
+
 // ---- Admin data and cost
 
 test("Admin data: the log pages newest first; devices show labels and no key material", async () => {

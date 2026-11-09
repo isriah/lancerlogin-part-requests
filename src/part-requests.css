@@ -1,0 +1,73 @@
+/* Part Requests module styles. Core marks the settings page and setup screen with a module root ([data-module="part-requests"]);
+   each rule is scoped beneath it with :where() so it keeps the specificity of the class it names. Colors, spacing, radii and
+   type come from Core's tokens, so light, dark and adopter colors follow Core. */
+
+:where([data-module="part-requests"]) a:not(.ui-button,.settings-setup-link,.settings-section-navigation a) { color: color-mix(in srgb,var(--primary) 30%,var(--ui-text)); font-weight: 750; text-underline-offset: var(--space-1); }
+:where([data-module="part-requests"]) .pr-stack { display: grid; gap: var(--space-4); min-width: 0; }
+:where([data-module="part-requests"]) .pr-stack > :where(h2,h3,p,ul,ol,dl) { margin-block: 0; }
+:where([data-module="part-requests"]) .pr-notice { margin: 0; }
+:where([data-module="part-requests"]) .pr-notice:focus { outline: 3px solid var(--ui-focus); outline-offset: 2px; }
+:where([data-module="part-requests"]) .pr-card-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2) var(--space-3); min-height: var(--control-min-block-size); }
+:where([data-module="part-requests"]) .pr-card-heading > * { margin: 0; }
+
+/* Forms */
+:where([data-module="part-requests"]) .pr-field { display: grid; gap: var(--space-2); min-width: 0; margin: 0; padding: 0; border: 0; }
+:where([data-module="part-requests"]) .pr-field > label,:where([data-module="part-requests"]) .pr-field > legend { margin: 0 0 var(--space-1); padding: 0; }
+:where([data-module="part-requests"]) .pr-field-error { color: var(--ui-error); font-weight: 700; }
+:where([data-module="part-requests"]) .pr-choice { display: flex; align-items: center; gap: var(--space-3); min-height: var(--control-min-block-size); font-weight: 500; cursor: pointer; }
+:where([data-module="part-requests"]) .pr-choice-group { display: grid; gap: var(--space-1); }
+:where([data-module="part-requests"]) .pr-replace { display: grid; gap: var(--space-3); }
+:where([data-module="part-requests"]) .pr-replace[hidden] { display: none; }
+:where([data-module="part-requests"]) .pr-saved-state { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); min-width: 0; }
+:where([data-module="part-requests"]) .pr-layout { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: var(--space-1) var(--space-5); margin: 0; padding: 0; list-style: none; font-size: var(--text-small); color: var(--ui-text-muted); }
+:where([data-module="part-requests"]) .pr-layout strong { color: var(--ui-text); }
+
+/* Log and device tables: a contained table on desktop, labelled stacked rows on phones. */
+:where([data-module="part-requests"]) .pr-table th[scope="row"] { color: var(--ui-text); background: none; font-size: .9rem; font-weight: 700; letter-spacing: normal; text-transform: none; }
+:where([data-module="part-requests"]) .pr-table td { vertical-align: top; }
+:where([data-module="part-requests"]) .pr-table tbody:last-child tr:last-child > * { border-bottom: 0; }
+:where([data-module="part-requests"]) .pr-time { white-space: nowrap; }
+:where([data-module="part-requests"]) .pr-log th[scope="row"] { min-width: 15rem; overflow-wrap: anywhere; }
+:where([data-module="part-requests"]) .pr-row-note { display: block; margin-top: var(--space-1); color: var(--ui-text-muted); font-size: var(--text-small); font-weight: 400; line-height: 1.4; }
+:where([data-module="part-requests"]) .pr-none { color: var(--ui-text-muted); }
+:where([data-module="part-requests"]) .pr-pill-neutral { border: 1px solid var(--ui-border); color: var(--ui-text-muted); background: var(--ui-surface-subtle); }
+:where([data-module="part-requests"]) .pr-group th { background: var(--ui-surface-subtle); }
+:where([data-module="part-requests"]) .pr-devices th[scope="rowgroup"] { color: var(--ui-text); background: var(--ui-surface-subtle); font-size: var(--text-small); letter-spacing: normal; text-transform: none; }
+:where([data-module="part-requests"]) .pr-group-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2) var(--space-3); font-weight: 800; }
+:where([data-module="part-requests"]) .pr-devices tr[data-revoked="true"] td:first-child { color: var(--ui-text-muted); }
+:where([data-module="part-requests"]) .pr-devices td { vertical-align: middle; }
+:where([data-module="part-requests"]) .dialog-backdrop > .pr-dialog[role="dialog"] { width: min(38rem,100%); padding: var(--space-5); }
+
+/* Status: label and value rows. */
+:where([data-module="part-requests"]) .pr-status-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: var(--space-4); align-items: start; }
+:where([data-module="part-requests"]) .pr-status-wide { grid-column: 1 / -1; }
+:where([data-module="part-requests"]) .pr-facts { margin: 0; }
+:where([data-module="part-requests"]) .pr-facts > div { display: grid; grid-template-columns: minmax(8rem,.7fr) minmax(0,1fr); gap: var(--space-3); align-items: center; min-width: 0; padding: var(--space-3) 0; border-bottom: 1px solid var(--ui-border); }
+:where([data-module="part-requests"]) .pr-facts > div:last-child { border-bottom: 0; }
+:where([data-module="part-requests"]) .pr-facts dt { color: var(--ui-text-muted); font-size: var(--text-small); }
+:where([data-module="part-requests"]) .pr-facts dd { min-width: 0; margin: 0; text-align: right; overflow-wrap: anywhere; font-size: var(--text-small); font-weight: 700; }
+:where([data-module="part-requests"]) .pr-notice-action { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); }
+:where([data-module="part-requests"]) .pr-notice-action > span { flex: 1 1 18rem; min-width: 0; }
+
+@media (max-width: 800px) {
+  :where([data-module="part-requests"]) .pr-status-grid { grid-template-columns: minmax(0,1fr); }
+  :where([data-module="part-requests"]) .pr-status-wide { grid-column: auto; }
+  :where([data-module="part-requests"]) .pr-layout { grid-template-columns: minmax(0,1fr); }
+  :where([data-module="part-requests"]) .pr-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  :where([data-module="part-requests"]) .pr-table,:where([data-module="part-requests"]) .pr-table tbody,:where([data-module="part-requests"]) .pr-table tr,:where([data-module="part-requests"]) .pr-table th,:where([data-module="part-requests"]) .pr-table td { display: block; width: 100%; min-width: 0; }
+  :where([data-module="part-requests"]) .pr-table tbody tr { display: grid; gap: var(--space-2); padding: var(--space-3); border-bottom: 1px solid var(--ui-border); }
+  :where([data-module="part-requests"]) .pr-table tbody:last-child tr:last-child { border-bottom: 0; }
+  :where([data-module="part-requests"]) .pr-table th,:where([data-module="part-requests"]) .pr-table td { padding: 0; border: 0; }
+  :where([data-module="part-requests"]) .pr-table th[scope="row"] { order: -1; font-size: var(--text-body); }
+  :where([data-module="part-requests"]) .pr-table td[data-label] { display: grid; grid-template-columns: minmax(6rem,32%) minmax(0,1fr); gap: var(--space-2); align-items: center; }
+  :where([data-module="part-requests"]) .pr-table td[data-label]::before { content: attr(data-label); color: var(--ui-text-muted); font-size: var(--text-caption); font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+  :where([data-module="part-requests"]) .pr-time { white-space: normal; }
+  :where([data-module="part-requests"]) .pr-group-heading .status-pill { white-space: normal; }
+  :where([data-module="part-requests"]) .pr-devices tbody tr.pr-group { padding: var(--space-3); background: var(--ui-surface-subtle); }
+  :where([data-module="part-requests"]) .pr-devices td.pr-device-action::before { display: none; }
+  :where([data-module="part-requests"]) .pr-devices td.pr-device-action { display: block; }
+  :where([data-module="part-requests"]) .pr-devices td.pr-device-action button.ui-button { width: 100%; }
+  :where([data-module="part-requests"]) .pr-facts > div { grid-template-columns: minmax(6.5rem,.6fr) minmax(0,1fr); }
+  :where([data-module="part-requests"]) .saved-credentials-actions { width: 100%; }
+  :where([data-module="part-requests"]) .saved-credentials-actions .ui-button { flex: 1 1 auto; }
+}

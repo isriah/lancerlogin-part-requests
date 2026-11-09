@@ -16,7 +16,8 @@
     "tablePrefix": "part_requests_",
     "entries": {
       "manifest": "./src/manifest.ts",
-      "api": "./src/api.ts"
+      "api": "./src/api.ts",
+      "dashboard": "./src/dashboard.tsx"
     },
     "migrations": "./migrations",
     "adoptedCoreMigrations": []

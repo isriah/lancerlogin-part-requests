@@ -1,5 +1,4 @@
 // Module definition. It imports nothing, so the plugin's own unit tests can read it without a Core checkout.
-// There are no dashboard pages yet: the Admin page and the setup screen are a later phase, and the routes are ready for them.
 const manifest = {
   id: "part-requests",
   label: "Part Requests",
@@ -10,7 +9,8 @@ const manifest = {
   // Core answers 500 on /admin/<module> routes unless a capability is marked for Operators. Every handler still requires an Admin.
   capabilities: [{ id: "part-requests.admin", label: "Part Requests administration (Admins only)", operator: true }],
   navigation: [],
-  settings: [],
+  // Admin only: Core shows a module settings page to Operators only when its dashboard page is marked for them, and this one is not.
+  settings: [{ label: "Part Requests", path: "/settings/part-requests" }],
   // Public routes and the Discord command stay down until the Notion connection is verified and this step is recorded.
   // Leave the version at 1: Core does not update an installed module's setup version, so raising it would lock setup.
   setup: { version: 1, steps: [{ id: "notion-connection", label: "Verified Notion connection", required: true }] },
