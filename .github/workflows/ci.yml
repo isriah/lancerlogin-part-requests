@@ -40,7 +40,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v7
         with:
-          node-version: 24.21.0
+          node-version: 24.22.1
       - name: Check the lockfile
         working-directory: plugin
         run: npm ci --ignore-scripts --no-audit --no-fund
