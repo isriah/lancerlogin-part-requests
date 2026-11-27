@@ -4,7 +4,7 @@ All notable changes to this plugin. Versions follow LancerLogin's release rules:
 
 Add a `## [X.Y.Z] - YYYY-MM-DD` entry above older entries for each stable or beta release.
 
-## [1.4.0] - Unreleased
+## [1.4.0] - 2026-11-27
 
 Requires LancerLogin Core `>=2.1.0-beta.13 <3.0.0` (module SDK `^1.9.0`). [Release notes](docs/releases/v1.4.0.md).
 

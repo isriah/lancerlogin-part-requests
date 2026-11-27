@@ -21,7 +21,7 @@ test("package.json, the manifest and plugin-release.json agree", () => {
   assert.equal(pkg.version, "1.4.0");
   assert.equal(pkg.lancerlogin.core, ">=2.1.0-beta.13 <3.0.0", "the first Core that stores a module's Notion comment name");
   assert.equal(pkg.peerDependencies["@lancerlogin/module-sdk"], "^1.9.0", "services.notion, NotionBindingField and NotionCommentNameField");
-  assert.equal(release.core.tag, "v2.1.0-beta.12");
+  assert.equal(release.core.tag, "v2.1.0-beta.13");
   assert.match(release.core.commit, /^[0-9a-f]{40}$/);
 });
 
