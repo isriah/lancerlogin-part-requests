@@ -4,7 +4,7 @@ All notable changes to this plugin. Versions follow LancerLogin's release rules:
 
 Add a `## [X.Y.Z] - YYYY-MM-DD` entry above older entries for each stable or beta release.
 
-## [1.3.0] - Unreleased
+## [1.3.0] - 2026-11-27
 
 Requires LancerLogin Core `>=2.1.0-beta.12 <3.0.0` (module SDK `^1.8.0`). [Release notes](docs/releases/v1.3.0.md).
 
@@ -15,7 +15,9 @@ Requires LancerLogin Core `>=2.1.0-beta.12 <3.0.0` (module SDK `^1.8.0`). [Relea
 - Migration `0005_reminders.sql`: reminder settings, runs and items. None of it is backed up.
 - The manifest declares `comments.create` and `pages.update` on `orders`, and an optional, read-only `people` binding (`retrieve`, `query`) for matching Notion people to members.
 
-## [1.2.0] - Unreleased
+## [1.2.0] - 2026-11-27
+
+Not published as a release of its own: 1.3.0 is the first release that includes it.
 
 Requires LancerLogin Core `>=2.1.0-beta.12 <3.0.0` (module SDK `^1.8.0`). [Release notes](docs/releases/v1.2.0.md).
 
