@@ -51,6 +51,9 @@ export function createTestDatabase(): TestDatabase {
     CREATE TABLE installations (id TEXT PRIMARY KEY NOT NULL);
     CREATE TABLE members (id TEXT PRIMARY KEY, installation_id TEXT NOT NULL REFERENCES installations(id) ON DELETE CASCADE, external_id TEXT NOT NULL,
       first_name TEXT NOT NULL, last_name TEXT NOT NULL, email TEXT, discord_user_id TEXT, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT '2026-01-01');
+    CREATE TABLE organization_settings (installation_id TEXT PRIMARY KEY NOT NULL, time_zone TEXT);
+    CREATE TABLE member_labels (id TEXT PRIMARY KEY, installation_id TEXT NOT NULL, name TEXT NOT NULL);
+    CREATE TABLE member_label_changes (id TEXT PRIMARY KEY, installation_id TEXT NOT NULL, member_id TEXT NOT NULL, label_id TEXT NOT NULL, action TEXT NOT NULL, effective_date TEXT NOT NULL, created_at TEXT NOT NULL);
     INSERT INTO installations(id) VALUES ('primary');
   `);
   for (const name of readdirSync(migrations).filter((file) => file.endsWith(".sql")).sort()) {

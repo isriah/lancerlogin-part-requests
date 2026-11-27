@@ -1,10 +1,12 @@
-// Data for the Admin pages: the request log and paired devices, with revoke, pairing PINs and a manual refresh.
+// Data for the Admin pages: the request log and paired devices, with revoke, pairing PINs and a manual refresh. The Reminders
+// tab's routes are in reminders-admin.ts.
 // Core lets assigned Operators reach /admin/part-requests, because it requires a capability marked for Operators. Every
 // handler here still requires an Admin, so that capability grants nothing.
 import { listActiveRosterIdentities, type D1Database } from "@lancerlogin/module-sdk/api";
 import { requireAdmin, type AdminRouteContext } from "./connection.ts";
 import { json, object, refuse } from "./http.ts";
 import { installationId, issuePinForMember, maximumDevicesPerMember, type Database } from "./pairing.ts";
+import { remindersRoute } from "./reminders-admin.ts";
 import { countStatement, limitWindowMs, pendingLimitMs, type Count } from "./requests.ts";
 
 const pageSize = (value: string | null) => Math.min(100, Math.max(1, Number.parseInt(value ?? "", 10) || 50));
@@ -107,6 +109,7 @@ async function refresh(db: Database) {
 export async function adminRoute(context: AdminRouteContext): Promise<Response | undefined> {
   const path = context.url.pathname.slice("/admin/part-requests".length);
   const method = context.request.method;
+  if (path === "/reminders" || path.startsWith("/reminders/")) return remindersRoute(context, path.slice("/reminders".length));
   const known = (path === "/requests" || path === "/devices") && method === "GET" || (path === "/devices/revoke" || path === "/recipients/refresh" || path === "/pins") && method === "POST";
   if (!known) return undefined;
   const { userId } = await requireAdmin(context);

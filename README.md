@@ -4,10 +4,11 @@ Students click a browser extension on a vendor's product page, review the detail
 
 **Needs Core's Notion connection: LancerLogin Core 2.1.0-beta.12 / module SDK 1.8.0 or later.** From 1.2.0 the plugin keeps no Notion token of its own. Core saves it in **Settings > Integrations > Notion** and sends every Notion request; the plugin names its `orders` binding, the ordering database an Admin chooses for it. An installation coming from 1.1 needs nothing done: see [Moving from 1.1](#moving-from-11).
 
-**Status: v1.2.0.** The backend and the Admin pages are built: pairing, the Notion connection, the device API, the request log, the recipient job, Core's setup screen and **Settings > Modules > Part Requests**. Carts here means reading open orders and recording who built a cart. Filling store carts belongs to the extension.
+**Status: v1.3.0.** The backend and the Admin pages are built: pairing, the Notion connection, the device API, the request log, the recipient job, [stale-request reminders](#stale-request-reminders), Core's setup screen and **Settings > Modules > Part Requests**. Carts here means reading open orders and recording who built a cart. Filling store carts belongs to the extension.
 
 | Plugin | LancerLogin Core | Module SDK | Module contract |
 | --- | --- | --- | --- |
+| 1.3.x | `>=2.1.0-beta.12 <3.0.0` | `^1.8.0` | 1 |
 | 1.2.x | `>=2.1.0-beta.12 <3.0.0` | `^1.8.0` | 1 |
 | 1.1.x | `>=2.1.0-beta.7 <3.0.0` | `^1.6.0` | 1 |
 | 1.0.x | `>=2.1.0-beta.7 <3.0.0` | `^1.6.0` | 1 |
@@ -15,11 +16,12 @@ Students click a browser extension on a vendor's product page, review the detail
 
 ## Admin pages
 
-**Settings > Modules > Part Requests**, Admin only, has three sections:
+**Settings > Modules > Part Requests**, Admin only, has four sections:
 
 - **Connection:** any problem and its fix at the top, then Core's Notion connection (with a link to **Settings > Integrations > Notion**, where the token is saved), the ordering database, last verified time, site address and Open setup, which reopens Core's setup screen; Core's own database picker for the `orders` binding, with **Use the previous ordering database** while Core has none chosen or a different one; **Verify connection**, which checks the chosen database's layout; the recipient list with Refresh now; pairing, with a notice while it is paused; and the Carts switch. Old `?section=setup` and `?section=status` links open this section.
 - **Requests log:** every request with its member and device, newest first, with a banner when any result is uncertain.
 - **Paired devices:** counts, search by name or device, and filters for No devices, At the limit, Inactive 30+ days and Off roster, then one compact row per member by name, including members with no devices. A row opens to that member's devices, with Revoke. **Generate pairing PIN** makes a PIN for a chosen member, for example one without Discord: the same PIN `/ordering-pin` makes, shown once with its expiry, the site address and a Copy button, and removed from the screen when it expires or the dialog closes. Inactive is a prompt to look, not a reason to revoke: last used only changes when a device sends a request or marks a cart item.
+- **Reminders:** stale-request reminders: a status card with **Check ordering database**, **Preview** and **Send reminders now**; the settings form; Core's picker for the optional People database, with **Check People**; and the last run. See [Stale-request reminders](#stale-request-reminders).
 
 Core shows its own setup screen by itself until setup is complete, and an Admin can reopen it from Connection. When Notion answers 401, 403 or 404 to a request or an orders read, or the refresh job gets a 403 or 404 reading the database or a 401 from any call, the code and time are recorded and Connection shows the rejected token or lost access at the top instead of Connected. A 500, a 429 and Core's own refusals record nothing. It clears on a successful verify or the next call that reaches the database, so a brief glitch doesn't stick. Listing users is not such a call. It doesn't stop requests or change what students are told: each call still tries Notion and reports its own result, and Carts can serve its copy for a while.
 
@@ -29,7 +31,11 @@ Core keeps a module open once its setup is complete, so a problem with Core's co
 
 ## Notion capabilities
 
-Core's Notion connection needs these of Notion's five capabilities for this version: **Read content**, **Insert content** and **Read user information** (without email addresses). It does not use Update content or Insert comments, and it never receives email addresses; later versions (stale-request reminders) will also need Update content and Insert comments. The manifest declares exactly what it calls, and Core refuses anything else: the `orders` binding with `retrieve`, `query` and `pages.create`, and users `list` and `retrieve`.
+Core's Notion connection needs these of Notion's capabilities for this version: **Read content**, **Insert content**, **Update content**, **Insert comments** and **Read user information** (without email addresses). Update content and Insert comments are used only by stale-request reminders: requests, Carts and the recipient list work without them. It never receives email addresses. The manifest declares exactly what it calls, and Core refuses anything else:
+
+- the required `orders` binding (the ordering database) with `retrieve`, `query`, `pages.create`, `comments.create` (a reminder comment) and `pages.update` (setting a request's Reminder sent date, and nothing else);
+- the optional `people` binding (the People database) with `retrieve` and `query` only, so Part Requests can never write to it;
+- users `list` and `retrieve`.
 
 ## Moving from 1.1
 
@@ -55,7 +61,7 @@ Then record the step with Core: `PUT /admin/modules/part-requests/setup` with `{
 
 The expected database layout: Item Description (title), Status (status or select, with `NORMAL Request` and `Incomplete Request`), Vendor (select, with all 20 store names), Team (select or multi-select), Orderer/Recipient (people), SKU (rich text), Product URL (url), Qty (number), Unit Price (number) and Extension (formula or rollup, never written). Core's Notion connection must be added to that database, with the capabilities above.
 
-After a restore, the site address comes back with this plugin's data, and Core's Notion connection and `orders` binding come back with Core's part of an entire-installation backup (an installation whose key can't read the token shows it as saved but unreadable until an Admin saves it again). Core still shows the module as set up, but requests answer `503 notion_not_connected` until an Admin verifies the connection again. Every device pairs again, and the log, the recipient list and each member's chosen person start empty. So do the copy of the open orders and the cart marks, and the Carts switch returns to on.
+After a restore, the site address comes back with this plugin's data, and Core's Notion connection and `orders` binding come back with Core's part of an entire-installation backup (an installation whose key can't read the token shows it as saved but unreadable until an Admin saves it again). Core still shows the module as set up, but requests answer `503 notion_not_connected` until an Admin verifies the connection again. Every device pairs again, and the log, the recipient list and each member's chosen person start empty. So do the copy of the open orders and the cart marks, and the Carts switch returns to on. Reminders are off, and their settings and history are gone.
 
 ## Device API
 
@@ -194,6 +200,47 @@ Under `/admin/part-requests`, Admin only. Core requires a capability marked for 
 | `POST /devices/revoke` | `{ deviceId }` ends that device's access at once. |
 | `POST /recipients/refresh` | Runs the recipient refresh now. |
 | `POST /pins` | `{ memberId }`. `201 { pin, expiresMs, siteAddress, memberId, memberName, pairedDevices }`: a pairing PIN for that member, who needs no Discord account. It is made by the same function as `/ordering-pin`, so it is the same 8-character PIN, works once, expires in 10 minutes, counts against the device limit, is stored only as its SHA-256, and cancels the member's earlier unused PIN from either path. The response is the only place the PIN appears. Each PIN writes one audit row, `part_requests.pin_issued`, with the Admin's user ID, the member ID as the target and the time, never the PIN. Refusals: `400 validation`, `404 unknown_member`, `409 not_active` (off the active roster), `409 device_limit` (remove a device first), `409 not_set_up` (no site address saved yet), `409 devices_changed`, and `429 rate_limited` with `Retry-After` after 30 PINs from one Admin in 10 minutes. |
+
+## Stale-request reminders
+
+Off until an Admin turns them on. On the chosen days (Mon, Wed and Fri at 15:00 in the installation's time zone by default), the job `part-requests.reminders` finds every request in the ordering database whose Status is Incomplete Request, that was created more than the threshold ago (2 days by default) and whose **Reminder sent** is empty or older than the cooldown (2 days by default). For each one, in this order:
+
+1. **A Notion comment on the request**, mentioning each person in Orderer/Recipient, so Notion notifies them.
+2. **A Discord message** in the chosen channel: mentions of the people who could be matched to a member, the same text, and the request's link.
+3. **Reminder sent** is set to now, so the request is not reminded again until the cooldown passes.
+
+The text, the same in Notion and Discord, with the request's Item Description and the threshold filled in:
+
+> Your part request '&lt;Item Description&gt;' has been in Incomplete Request for more than &lt;N&gt; days, so it has not been ordered. Finish the details and change the Status to NORMAL, RUSH or SLOW Request, or delete the request if you no longer need it.
+
+A threshold of exactly one day reads "1 day", and one below a day, for testing, reads in minutes. Nothing else on a request is changed: no status, no archive, no trash.
+
+**Setting it up.** Reminders always use the ordering database chosen on the Connection tab, through Core's `orders` binding. On the Reminders tab:
+
+1. Add **Created** (created time) and **Reminder sent** (date) to the ordering database, and make sure Status has Incomplete Request, NORMAL Request, RUSH Request and SLOW Request. Turn on **Insert comments** and **Update content** for Core's Notion connection.
+2. Press **Check ordering database**. It reads the layout through Core and saves it; a failed check saves nothing.
+3. Optionally choose the **People database** with Core's picker and press **Check People**. It needs Notion account (people), LancerLogin member ID (text) and Active (checkbox), and is only ever read.
+4. Choose the days, time, thresholds and the Discord channel (required while reminders are on), turn reminders on and save. **Preview** lists what the next run would do without sending or changing anything; **Send reminders now** starts a run at once.
+
+**Who gets pinged.** With a checked People database: Notion account, then its LancerLogin member ID (by default the ID members type, the roster's external ID), then that active member's Discord account. A Notion account or member ID on more than one active row is ambiguous, and nobody is pinged for it. Without People, or while it has no active rows: the one active member who chose that person as their default recipient, which may be a mentor. Inactive members and members without a linked Discord account are not pinged. Everyone on the request is still mentioned in the Notion comment, and the last run lists each skipped ping and why.
+
+**Failures.** A comment Notion refuses with 400 or 429 is tried 3 times; a 403 (Insert comments off) or 404 stops the run, and the tab says what to turn on. A comment Notion did not confirm (a network failure, 5xx or 409) is never sent again: it counts for the cooldown, is listed under "Check the page", and skips Discord and the mark. Discord is tried twice, and the mark still runs if it fails. The mark is tried 3 times; a 403 (Update content off) stops the run. While Core holds deliveries (after a restore) or waits out a Notion rate limit, the run waits. If Core's connection or the `orders` binding is unusable, or Core now points `orders` at another database, the run stops before sending and asks for a new check; a People database pointed elsewhere is not used until it is checked again. A run stops at 200 requests and says so. Run history is kept for 30 days.
+
+**Privacy.** Notion gets only the comment: mentions and the text. Discord gets only mentions, the item description and the request's link: no names, team, price or check-in data, and no DMs. Reminder tables, logs and job results hold Notion and Discord IDs and counts, never names or emails; the Admin page shows names from the recipient list. Reminder settings and history are not in backups, so a restore turns reminders off.
+
+**Budget.** Each scheduler slice is one step: the layouts (2 Notion requests with People), one page of 20 stale requests or 100 People rows (1), a comment or a mark (2, because Core first reads the page to prove it is in the ordering database), or one Discord message. Measured against the test stand-in, the worst slice uses 7 D1 queries and 2 external requests (9 of a slice's 40; the limits are 30 D1 and 12 external), and a cron-fallback pass runs at most 3 slices and stops before Core's 8 Notion requests per invocation (worst measured: 4 Notion requests, 22 of the pass's 46). Ten stale requests take about 35 slices.
+
+Routes, under `/admin/part-requests/reminders`, Admin only; each change must come from the dashboard origin and is audited (`part_requests.reminders_saved`, `_target_verified`, `_people_verified`, `_people_removed`, `_run_requested`):
+
+| Route | Body | Result |
+| --- | --- | --- |
+| `GET` (no further path) | | Settings; `core` (`connected`, `capabilities.comment` and `.update`, `ordersBound`, `peopleBound`); the checked layout `target`, with `current` while it is the data source Core binds; `targetVerified`; `people`; `problem`, the last run's or check's code; `timeZone`; `nextRunMs`; `activeRun`; and `lastRun`, with counts and the requests to look at. |
+| `PUT /settings` | `{ revision, enabled, weekdays, runTime, staleMinutes, cooldownMinutes, discordChannelId, peopleKey }` | Saves the whole form. `400 validation` with `errors`, `409 target_unverified`, `409 revision_conflict`. Turning reminders off stops a run in progress. |
+| `POST /verify` | `{}` | Checks the ordering database's layout through `orders`. The same refusals as `POST /module-setup/part-requests/verify`. |
+| `POST /people/verify` | `{}` | Checks the People database's layout through `people`. `409 people_unbound` until one is chosen. |
+| `DELETE /people` | | Stops using People; pings go back to default recipients. |
+| `POST /preview` | | A dry run: at most 3 Notion requests, and nothing written anywhere. |
+| `POST /run` | | `202 { runKey }`. `409 reminders_off`, `target_unverified` or `run_active`. |
 
 ## Recipient refresh
 

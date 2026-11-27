@@ -4,6 +4,17 @@ All notable changes to this plugin. Versions follow LancerLogin's release rules:
 
 Add a `## [X.Y.Z] - YYYY-MM-DD` entry above older entries for each stable or beta release.
 
+## [1.3.0] - Unreleased
+
+Requires LancerLogin Core `>=2.1.0-beta.12 <3.0.0` (module SDK `^1.8.0`). [Release notes](docs/releases/v1.3.0.md).
+
+### Added
+
+- Stale-request reminders: the job `part-requests.reminders` comments on each Incomplete Request older than the threshold, mentioning its Orderer/Recipient, posts the same text in a Discord channel with pings, then sets Reminder sent. Mon, Wed and Fri at 15:00 in the installation's time zone by default, with a 2-day threshold and cooldown. Off until an Admin turns it on.
+- The **Reminders** tab in **Settings > Modules > Part Requests**, and its routes under `/admin/part-requests/reminders`.
+- Migration `0005_reminders.sql`: reminder settings, runs and items. None of it is backed up.
+- The manifest declares `comments.create` and `pages.update` on `orders`, and an optional, read-only `people` binding (`retrieve`, `query`) for matching Notion people to members.
+
 ## [1.2.0] - Unreleased
 
 Requires LancerLogin Core `>=2.1.0-beta.12 <3.0.0` (module SDK `^1.8.0`). [Release notes](docs/releases/v1.2.0.md).

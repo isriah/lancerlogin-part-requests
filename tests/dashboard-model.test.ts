@@ -9,8 +9,9 @@ const zone = "America/Los_Angeles";
 const at = Date.UTC(2026, 10, 8, 22, 14);
 const databaseId = "11111111-2222-4333-8444-555555555555";
 
-test("the settings page has three tabs, and old Setup and Status links land on Connection", () => {
-  assert.deepEqual(adminSections.map(([, title]) => title), ["Connection", "Requests log", "Paired devices"]);
+test("the settings page has four tabs, and old Setup and Status links land on Connection", () => {
+  assert.deepEqual(adminSections.map(([, title]) => title), ["Connection", "Requests log", "Paired devices", "Reminders"]);
+  assert.equal(adminSection("reminders"), "reminders");
   for (const old of ["setup", "status"]) assert.equal(adminSection(old), "connection", old);
   assert.equal(adminSection(null), "connection");
   assert.equal(adminSection("nonsense"), "connection");
@@ -148,7 +149,7 @@ test("the Connection card: Core's state in a few words, the capabilities this ve
   assert.equal(coreState({ ...core, saved: false, connected: false }), "Not set up");
   assert.equal(coreState({ ...core, readable: false, connected: false }), "Saved, but can't be read");
   assert.equal(coreState({ ...core, enabled: false, connected: false }), "Turned off");
-  assert.deepEqual(neededCapabilities.map(([, label]) => label), ["Read content", "Insert content", "Read user information without email addresses"]);
+  assert.deepEqual(neededCapabilities.map(([, label]) => label), ["Read content", "Insert content", "Update content", "Insert comments", "Read user information without email addresses"]);
   const previous = { databaseId: "11111111-2222-4333-8444-555555555555", dataSourceId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", core };
   assert.equal(offerPrevious({ ...previous, binding: null }), true);
   assert.equal(offerPrevious({ ...previous, binding: { databaseId: previous.databaseId, dataSourceId: "AAAAAAAABBBB4CCC8DDDEEEEEEEEEEEE", name: "Ordering" } }), false, "the same data source, however it is written");

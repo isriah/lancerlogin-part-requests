@@ -2,7 +2,9 @@
 // It sends real requests through `fetch`, so the fetch-boundary Notion stub (notion-stub.ts) still sees and answers every
 // call, with Core's token in the Authorization header. Like Core it refuses undeclared operations and unbound databases
 // before any request, caps each invocation at 8 requests, holds every call after a rate limit, refuses writes while
-// deliveries are paused, strips email addresses, and implements importLegacyConnection's rules. Each Notion request
+// deliveries are paused, strips email addresses, and implements importLegacyConnection's rules. Before a comment or an update
+// it reads the page to prove it is in the bound data source, unless a query or create in the same invocation returned it,
+// and refuses (notion_out_of_scope) a page from anywhere else. Each Notion request
 // charges `cost` with one external request and one D1 read (Core's authority check), and the first use in an invocation
 // one more D1 read (Core loading its connection and bindings).
 import manifest from "../../src/manifest.ts";
@@ -29,6 +31,8 @@ export type CoreNotionState = {
   pausedUntilMs: number;
   deliveryPausedUntil: number | null;
   imports: { outcome: string; bindings: string[] }[];
+  /** Pages refused as outside their binding, as Core audits them. */
+  refusals: { binding: string; operation: string }[];
   /** Make the next import throw, as a network failure or a D1 failure inside Core would. */
   importFails: boolean;
 };
@@ -65,16 +69,19 @@ async function send(token: string, path: string, method = "GET", body?: unknown,
 }
 
 export function createCoreNotion(credentials: Credentials) {
-  const state: CoreNotionState = { connection: null, bindings: new Map(), capabilities: {}, pausedUntilMs: 0, deliveryPausedUntil: null, imports: [], importFails: false };
+  const state: CoreNotionState = { connection: null, bindings: new Map(), capabilities: {}, pausedUntilMs: 0, deliveryPausedUntil: null, imports: [], refusals: [], importFails: false };
   const declared = (manifest as any).notion as { users?: string[]; bindings: { id: string; required: boolean; operations: string[] }[] } | undefined;
 
   /** Core's connection, as an Admin saving a token in Settings > Integrations > Notion leaves it. */
   async function connect(token = testToken) { state.connection = { token, ...await credentials.encrypt({ token }), enabled: true, readable: true }; }
-  function bind(binding: CoreBinding) { state.bindings.set("orders", binding); }
+  function bind(binding: CoreBinding, id = "orders") { state.bindings.set(id, binding); }
 
   /** `services.notion` for one invocation (a route request or one job run). */
   function service(cost: Cost) {
     let loaded = false; let calls = 0;
+    /** Pages Core returned in this invocation, per binding: known to be in its data source, so no page check. */
+    const known = new Map<string, Set<string>>();
+    const remember = (bindingId: string, id: unknown) => { const page = format(id); if (!page) return; if (!known.has(bindingId)) known.set(bindingId, new Set()); known.get(bindingId)!.add(page); };
     const load = () => { if (!loaded) { loaded = true; cost.d1 += 1; } };
     const refusal = (code: string, status: number) => new CoreNotionError(code, code, { status });
     const usable = () => Boolean(state.connection && state.connection.enabled && state.connection.readable);
@@ -107,6 +114,19 @@ export function createCoreNotion(credentials: Credentials) {
       if (!row) throw refusal("notion_unbound", 409);
       return row;
     }
+    const declaredOperation = (bindingId: string, operation: string) => {
+      if (!declared?.bindings.find((item) => item.id === bindingId)?.operations.includes(operation)) throw refusal("notion_not_declared", 403);
+    };
+    const pageIdOf = (value: unknown) => { const id = format(value); if (!id) throw new CoreHttpError(400, "A Notion page ID is required"); return id; };
+    const inDataSource = (page: Json, row: CoreBinding) => page?.object === "page" && page.parent?.type === "data_source_id" && same(page.parent.data_source_id, row.dataSourceId);
+    const outOfScope = (bindingId: string, operation: string) => { state.refusals.push({ binding: bindingId, operation }); return refusal("notion_out_of_scope", 403); };
+    /** Core's page-in-database check: free for a page this invocation already saw, one read of the page otherwise. */
+    async function inScope(bindingId: string, row: CoreBinding, id: string, operation: string) {
+      if (known.get(bindingId)?.has(id)) return;
+      const page = await request("read", `/pages/${id}`);
+      if (!inDataSource(page, row)) throw outOfScope(bindingId, operation);
+      remember(bindingId, id);
+    }
     const pageList = (page: Json) => {
       if (!Array.isArray(page.results)) throw new CoreNotionError("Notion returned an unreadable response.", "notion_response", { providerStatus: 200 });
       return page;
@@ -133,6 +153,7 @@ export function createCoreNotion(credentials: Credentials) {
         const pageSize = query.pageSize ?? 100;
         if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 100) throw new CoreHttpError(400, "A Notion page size is 1 to 100");
         const page = pageList(await request("read", `/data_sources/${row.dataSourceId}/query`, "POST", { page_size: pageSize, ...(query.cursor ? { start_cursor: query.cursor } : {}), ...(query.filter === undefined ? {} : { filter: query.filter }), ...(query.sorts === undefined ? {} : { sorts: query.sorts }) }));
+        for (const result of page.results as Json[]) if (result?.object === "page") remember(bindingId, result.id);
         return { results: withoutEmails(page.results), ...(page.has_more && page.next_cursor ? { nextCursor: String(page.next_cursor) } : {}) };
       },
       async createPage(bindingId: string, input: { properties: Record<string, unknown> }) {
@@ -143,14 +164,38 @@ export function createCoreNotion(credentials: Credentials) {
         const page = await request("insert", "/pages", "POST", { parent: { type: "data_source_id", data_source_id: row.dataSourceId }, properties: input.properties }, true);
         const id = format(page.id);
         if (!id) throw new CoreNotionError("Notion accepted the request, but did not return the new page.", "notion_response", { providerStatus: 200, uncertain: true });
+        remember(bindingId, id);
         let url: string | null = null;
         try { const parsed = new URL(String(page.url)); url = parsed.protocol === "https:" && /(^|\.)notion\.(so|com|site)$/.test(parsed.hostname) ? parsed.href : null; } catch { url = null; }
         return { id, url, page: withoutEmails(page) };
       },
-      async page() { throw refusal("notion_not_declared", 403); },
-      async updatePage() { throw refusal("notion_not_declared", 403); },
+      async page(bindingId: string, pageId: string) {
+        const row = bound(bindingId, "pages.retrieve"); const id = pageIdOf(pageId);
+        const page = await request("read", `/pages/${id}`);
+        if (!inDataSource(page, row)) throw outOfScope(bindingId, "pages.retrieve");
+        remember(bindingId, id);
+        return withoutEmails(page);
+      },
+      async updatePage(bindingId: string, pageId: string, input: { properties: Record<string, unknown> }) {
+        declaredOperation(bindingId, "pages.update");
+        const id = pageIdOf(pageId);
+        if (!input?.properties || typeof input.properties !== "object" || !Object.keys(input.properties).length || Object.keys(input).length !== 1) throw new CoreHttpError(400, "Notion properties must be a non-empty object");
+        if (state.deliveryPausedUntil !== null) throw new CoreHttpError(409, "Outbound delivery is paused, so nothing was sent to Notion.");
+        const row = bound(bindingId, "pages.update");
+        await inScope(bindingId, row, id, "pages.update");
+        return withoutEmails(await request("update", `/pages/${id}`, "PATCH", { properties: input.properties }));
+      },
       async trashPage() { throw refusal("notion_not_declared", 403); },
-      async createComment() { throw refusal("notion_not_declared", 403); },
+      async createComment(bindingId: string, pageId: string, input: { richText: unknown[] }) {
+        declaredOperation(bindingId, "comments.create");
+        const id = pageIdOf(pageId);
+        if (!Array.isArray(input?.richText) || !input.richText.length || input.richText.length > 100) throw new CoreHttpError(400, "A Notion comment needs 1 to 100 rich text items");
+        if (state.deliveryPausedUntil !== null) throw new CoreHttpError(409, "Outbound delivery is paused, so nothing was sent to Notion.");
+        const row = bound(bindingId, "comments.create");
+        await inScope(bindingId, row, id, "comments.create");
+        const comment = await request("comment", "/comments", "POST", { parent: { page_id: id }, rich_text: input.richText }, true);
+        return { id: format(comment.id) ?? null };
+      },
       users: Object.freeze({
         async list(input: { cursor?: string; pageSize?: number } = {}) {
           if (!declared?.users?.includes("list")) throw refusal("notion_not_declared", 403);
