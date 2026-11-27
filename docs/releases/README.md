@@ -5,6 +5,6 @@ Every stable or beta release tag has a matching `vX.Y.Z.md` or `vX.Y.Z-beta.N.md
 List each release below as `- [vX.Y.Z](vX.Y.Z.md) - one-line summary`.
 
 - [v1.3.0](v1.3.0.md) - Stale-request reminders: a Notion comment and a Discord ping for Incomplete Requests left too long.
-- [v1.2.0](v1.2.0.md) - Uses Core's shared Notion connection; the token moves to Settings > Integrations > Notion by itself.
+- [v1.2.0](v1.2.0.md) - Uses Core's shared Notion connection; the token moves to Settings > Integrations > Notion by itself. Published as part of v1.3.0.
 - [v1.1.0](v1.1.0.md) - Admins can generate a pairing PIN for a member, for members without Discord.
 - [v1.0.0](v1.0.0.md) - First stable release: part requests, Discord pairing, Carts and the Admin pages.
