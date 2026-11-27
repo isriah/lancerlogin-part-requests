@@ -7,12 +7,18 @@ const manifest = {
   available: true,
   dependencies: [],
   // Core answers 500 on /admin/<module> routes unless a capability is marked for Operators. Every handler still requires an Admin.
-  // Notion through Core's one connection (SDK 1.8.0). Core refuses anything not declared here. `retrieve` reads the layout,
-  // `query` reads open orders and the people named on requests, and `pages.create` adds a request. Users are listed and read
-  // one at a time for the recipient list; their email addresses are not needed, so `email` is not declared.
+  // Notion through Core's one connection (SDK 1.8.0). Core refuses anything not declared here. On `orders`: `retrieve` reads
+  // the layout, `query` reads open orders, the people named on requests and stale requests, `pages.create` adds a request,
+  // `comments.create` posts a stale-request reminder and `pages.update` sets its "Reminder sent" date (nothing else is ever
+  // updated). `people` is optional and read only: reminders look up each person's LancerLogin member ID there, and Chores is
+  // its only writer. Users are listed and read one at a time for the recipient list; their email addresses are not needed,
+  // so `email` is not declared.
   notion: {
     users: ["list", "retrieve"],
-    bindings: [{ id: "orders", label: "Ordering database", reason: "Part requests from the browser extension are added here, and Carts and the recipient list read it.", required: true, kind: "data_source", operations: ["retrieve", "query", "pages.create"] }],
+    bindings: [
+      { id: "orders", label: "Ordering database", reason: "Part requests from the browser extension are added here, Carts and the recipient list read it, and stale-request reminders comment on requests and set their Reminder sent date.", required: true, kind: "data_source", operations: ["retrieve", "query", "pages.create", "comments.create", "pages.update"] },
+      { id: "people", label: "People database (reminders)", reason: "Optional. Stale-request reminders read it to find the LancerLogin member behind each Notion person, so Discord pings the right member. Part Requests never writes to it.", required: false, kind: "data_source", operations: ["retrieve", "query"] },
+    ],
   },
   capabilities: [{ id: "part-requests.admin", label: "Part Requests administration (Admins only)", operator: true }],
   navigation: [],
@@ -22,7 +28,10 @@ const manifest = {
   // connection and this step is recorded.
   // Leave the version at 1: Core does not update an installed module's setup version, so raising it would lock setup.
   setup: { version: 1, steps: [{ id: "notion-connection", label: "Verified Notion connection", required: true }] },
-  jobs: [{ id: "part-requests.recipients", interval: 21_600_000, label: "Part Requests recipient refresh" }],
+  jobs: [
+    { id: "part-requests.recipients", interval: 21_600_000, label: "Part Requests recipient refresh" },
+    { id: "part-requests.reminders", interval: 300_000, label: "Part Requests stale-request reminders" },
+  ],
   discordCommands: [{ name: "ordering-pin", type: 1, description: "Get a private PIN to pair the part request browser extension" }],
   apiRoutes: [
     { path: "/public/part-requests", match: "prefix", access: "service" },
@@ -36,6 +45,7 @@ const manifest = {
       "part_requests_notion", "part_requests_submissions", "part_requests_device_limits", "part_requests_pairing_address_limits",
       "part_requests_recipients", "part_requests_recipient_refresh", "part_requests_member_recipients",
       "part_requests_orders_state", "part_requests_orders_cache", "part_requests_cart_marks",
+      "part_requests_reminder_settings", "part_requests_reminder_runs", "part_requests_reminder_items",
     ],
     sharedFields: [],
     transientAuthority: [],
@@ -45,6 +55,7 @@ const manifest = {
   // request log, recipients and each member's chosen person start empty. The orders copy and cart marks don't
   // travel either: the copy is rebuilt from Notion in a minute, and a mark names a device that has to pair again and expires anyway.
   // carts_enabled is deliberately not among the settings columns in api.ts, so the Carts switch returns to on after a restore.
+  // Reminder settings and runs do not travel either, so a restore turns reminders off until an Admin checks them again.
   backup: {
     version: 1,
     tables: ["part_requests_settings"],
@@ -53,6 +64,7 @@ const manifest = {
       "part_requests_notion", "part_requests_submissions", "part_requests_device_limits", "part_requests_pairing_address_limits",
       "part_requests_recipients", "part_requests_recipient_refresh", "part_requests_member_recipients",
       "part_requests_orders_state", "part_requests_orders_cache", "part_requests_cart_marks",
+      "part_requests_reminder_settings", "part_requests_reminder_runs", "part_requests_reminder_items",
     ],
   },
   lifecycle: {
@@ -62,9 +74,10 @@ const manifest = {
       "part_requests_notion", "part_requests_submissions", "part_requests_device_limits", "part_requests_pairing_address_limits",
       "part_requests_recipients", "part_requests_recipient_refresh", "part_requests_member_recipients",
       "part_requests_cart_marks", "part_requests_orders_cache", "part_requests_orders_state",
+      "part_requests_reminder_items", "part_requests_reminder_runs", "part_requests_reminder_settings",
     ],
   },
-  deletedData: ["Part Requests settings, pairing PINs and paired devices, the checked layout of the ordering database (and a Notion token saved by version 1.1 that was never moved to Core), the request log, recipients, each member's chosen person, the copy of open orders and cart marks"],
+  deletedData: ["Part Requests settings, pairing PINs and paired devices, the checked layout of the ordering database (and a Notion token saved by version 1.1 that was never moved to Core), the request log, recipients, each member's chosen person, the copy of open orders and cart marks, and reminder settings and run history"],
 } as const;
 
 export default manifest;

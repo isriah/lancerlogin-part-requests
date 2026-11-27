@@ -179,8 +179,8 @@ export async function requireAdmin(context: AdminRouteContext) {
   return principal;
 }
 
-/** How a Notion failure reads to an Admin verifying. Only fixed messages: nothing from Notion's reply. */
-const verifyFailure = (error: unknown) => {
+/** How a Notion failure reads to an Admin verifying (here and on the Reminders tab). Only fixed messages: nothing from Notion's reply. */
+export const verifyFailure = (error: unknown) => {
   if (!(error instanceof AppError)) throw error;
   if (error.code === "schema") return refuse(422, "schema_mismatch", error.message);
   if (error.code === "notion_401") return refuse(422, "notion_token_rejected", error.message);

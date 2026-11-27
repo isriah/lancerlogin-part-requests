@@ -7,6 +7,7 @@ import { json, object, refuse } from "./http.ts";
 import { authenticateDevice, clientAddress, deviceRefusedMessage, exchangePin, installationId, issuePin, type Database } from "./pairing.ts";
 import { clearMarks, readOrders, saveMarks } from "./orders.ts";
 import { refreshRecipients } from "./recipients.ts";
+import { remindersJob, type ReminderJobContext } from "./reminders.ts";
 import { checkRepeats, createRequest, readOptions, readRequest, revokeSelf, saveRecipient, type DeviceRequest } from "./requests.ts";
 
 const database = (db: D1Database) => db as unknown as Database;
@@ -53,7 +54,8 @@ const api = defineApiModule({
   discord: {
     "ordering-pin": (db: D1Database, interaction: DiscordModuleInteraction, now: number) => issuePin(database(db), interaction.member?.user?.id ?? interaction.user?.id, now),
   },
-  jobs: { "part-requests.recipients": (context) => refreshRecipients(context) },
+  // Separate jobs, so a reminder failure cannot disturb the recipient refresh or the ordering connection.
+  jobs: { "part-requests.recipients": (context) => refreshRecipients(context), "part-requests.reminders": (context) => remindersJob(context as unknown as ReminderJobContext) },
   setup: {
     predicates: { "notion-connection": (installation: string) => ({ sql: stepSql, bindings: [installation, installation] }) },
     stepValid: async (db: D1Database, stepId: string) => stepId === "notion-connection" && Boolean(await db.prepare(`SELECT 1 AS present WHERE ${stepSql}`).bind(installationId, installationId).first()),
@@ -77,6 +79,9 @@ const api = defineApiModule({
       { kind: "delete", table: "part_requests_cart_marks" },
       { kind: "delete", table: "part_requests_orders_cache" },
       { kind: "delete", table: "part_requests_orders_state" },
+      { kind: "delete", table: "part_requests_reminder_items" },
+      { kind: "delete", table: "part_requests_reminder_runs" },
+      { kind: "delete", table: "part_requests_reminder_settings" },
     ],
   },
   backup: { version: 1, tables: { part_requests_settings: ["installation_id", "site_address", "updated_ms"] } },

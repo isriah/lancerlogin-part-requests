@@ -30,7 +30,7 @@ export type RosterPerson = { readonly id: string; readonly name: string };
 export type DeviceList = { readonly devices: readonly Device[]; readonly limitPerMember: number; readonly roster: readonly RosterPerson[]; readonly rosterLimited: boolean };
 
 // ---- Sections of the settings page
-export const adminSections = [["connection", "Connection"], ["requests", "Requests log"], ["devices", "Paired devices"]] as const;
+export const adminSections = [["connection", "Connection"], ["requests", "Requests log"], ["devices", "Paired devices"], ["reminders", "Reminders"]] as const;
 export type AdminSection = (typeof adminSections)[number][0];
 
 /** The section a link asks for. Anything else opens Connection, which includes `setup` and `status`, the tabs it replaced. */
@@ -180,8 +180,8 @@ export const isConnected = (status: Pick<SetupStatus, "problem">) => status.prob
 export const integrationsPath = "/settings/integrations";
 export const integrationsLabel = "Settings > Integrations > Notion";
 
-/** The three of Notion's five capabilities this version uses. Update content and Insert comments come with reminders, later. */
-export const neededCapabilities: readonly (readonly [string, string])[] = [["read", "Read content"], ["insert", "Insert content"], ["users", "Read user information without email addresses"]];
+/** Notion's capabilities this version uses. Update content and Insert comments are for stale-request reminders only. */
+export const neededCapabilities: readonly (readonly [string, string])[] = [["read", "Read content"], ["insert", "Insert content"], ["update", "Update content"], ["comment", "Insert comments"], ["users", "Read user information without email addresses"]];
 
 /** What Core's connection looks like, in a few words for the Connection card. */
 export function coreState(core: CoreNotion): string {

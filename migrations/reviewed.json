@@ -14,5 +14,9 @@
   {
     "name": "0004_notion_rejection.sql",
     "sha256": "f64c70591391d3dcfaf4df76b0e9da5c53c0a05d84b6a80e4d08708497ed89b0"
+  },
+  {
+    "name": "0005_reminders.sql",
+    "sha256": "cc4efd7b7f0a2ba02f1be0aa46bf266302e72a3b5154b0e89b5fe4566cca8b38"
   }
 ]

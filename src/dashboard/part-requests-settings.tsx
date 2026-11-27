@@ -1,4 +1,4 @@
-// Settings > Modules > Part Requests, Admin only: Connection, Requests log and Paired devices.
+// Settings > Modules > Part Requests, Admin only: Connection, Requests log, Paired devices and Reminders.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { SettingsSectionNavigation, settingsSectionHref, usePath } from "@lancerlogin/module-sdk/dashboard";
 import { ConnectionCard, useSetupStatus } from "./part-requests-connection";
@@ -8,6 +8,7 @@ import {
   type AdminSection, type Device, type MemberFilter, type MemberRow, type DeviceList, type LoggedRequest, type RequestLogPage, type SetupStatus,
 } from "./part-requests-model.ts";
 import { GeneratePinDialog } from "./part-requests-pin";
+import { RemindersTab } from "./part-requests-reminders";
 import { ConfirmDialog, Field, fieldAria, LoadState, Notice, Pill } from "./part-requests-ui";
 
 export function PartRequestsSettings({ openSetup }: { openSetup: () => void }) {
@@ -31,6 +32,7 @@ export function PartRequestsSettings({ openSetup }: { openSetup: () => void }) {
       </>}
       {status && section === "requests" && <RequestsLog databaseId={status.databaseId} />}
       {section === "devices" && <PairedDevices />}
+      {section === "reminders" && <RemindersTab />}
     </div>
   </section>;
 }

@@ -18,22 +18,28 @@ test("package.json, the manifest and plugin-release.json agree", () => {
   assert.equal(manifest.tablePrefix, "part_requests_");
   assert.equal(manifest.tablePrefix, pkg.lancerlogin.tablePrefix);
   assert.equal(pkg.name, `lancerlogin-module-${manifest.id}`);
-  assert.equal(pkg.version, "1.2.0");
+  assert.equal(pkg.version, "1.3.0");
   assert.equal(pkg.lancerlogin.core, ">=2.1.0-beta.12 <3.0.0", "the first Core with its Notion connection");
   assert.equal(pkg.peerDependencies["@lancerlogin/module-sdk"], "^1.8.0", "services.notion and NotionBindingField");
   assert.equal(release.core.tag, "v2.1.0-beta.12");
   assert.match(release.core.commit, /^[0-9a-f]{40}$/);
 });
 
-test("Notion: one required ordering database with only the operations this version calls, user list and lookup, and no email", () => {
+test("Notion: the required ordering database and the optional read-only People database, with only the operations this version calls, and no email", () => {
   assert.deepEqual(manifest.notion, {
     users: ["list", "retrieve"],
-    bindings: [{ id: "orders", label: "Ordering database", reason: "Part requests from the browser extension are added here, and Carts and the recipient list read it.", required: true, kind: "data_source", operations: ["retrieve", "query", "pages.create"] }],
+    bindings: [
+      { id: "orders", label: "Ordering database", reason: "Part requests from the browser extension are added here, Carts and the recipient list read it, and stale-request reminders comment on requests and set their Reminder sent date.", required: true, kind: "data_source", operations: ["retrieve", "query", "pages.create", "comments.create", "pages.update"] },
+      { id: "people", label: "People database (reminders)", reason: "Optional. Stale-request reminders read it to find the LancerLogin member behind each Notion person, so Discord pings the right member. Part Requests never writes to it.", required: false, kind: "data_source", operations: ["retrieve", "query"] },
+    ],
   });
   // As Core validates them: plain text within its lengths.
-  const [orders] = manifest.notion.bindings;
-  assert.ok(orders.label.length <= 80 && orders.label.trim() === orders.label);
-  assert.ok(orders.reason.length <= 200 && orders.reason.trim() === orders.reason);
+  for (const binding of manifest.notion.bindings) {
+    assert.ok(binding.label.length <= 80 && binding.label.trim() === binding.label);
+    assert.ok(binding.reason.length <= 200 && binding.reason.trim() === binding.reason, `${binding.id} reason is ${binding.reason.length} characters`);
+  }
+  // People is read only: nothing that writes, trashes or comments.
+  assert.deepEqual(manifest.notion.bindings[1]!.operations.filter((operation: string) => operation !== "retrieve" && operation !== "query"), []);
   // No Notion request leaves the plugin except through Core: no fetch, no API host, no Notion headers.
   for (const name of readdirSync(new URL("src/", root)).filter((file) => file.endsWith(".ts"))) {
     const source = read(`src/${name}`);
