@@ -43,6 +43,9 @@
 /* The People card: Core's binding picker sits inside it without a second card, heading, description or pill. */
 :where([data-module="part-requests"]) .pr-people .notion-binding-card { padding: 0; border: 0; background: none; box-shadow: none; }
 :where([data-module="part-requests"]) .pr-people .notion-binding-card > h2,:where([data-module="part-requests"]) .pr-people .notion-binding-heading,:where([data-module="part-requests"]) .pr-people .notion-binding > .notion-note { display: none; }
+/* The comment name card: Core's field sits inside it the same way, keeping Core's hint about leaving the name blank. */
+:where([data-module="part-requests"]) .pr-comment-name .notion-binding-card { padding: 0; border: 0; background: none; box-shadow: none; }
+:where([data-module="part-requests"]) .pr-comment-name .notion-binding-card > h2 { display: none; }
 
 /* Log and device tables: a contained table on desktop, labelled stacked rows on phones. */
 :where([data-module="part-requests"]) .pr-table th[scope="row"] { color: var(--ui-text); background: none; font-size: .9rem; font-weight: 700; letter-spacing: normal; text-transform: none; }

@@ -4,6 +4,14 @@ All notable changes to this plugin. Versions follow LancerLogin's release rules:
 
 Add a `## [X.Y.Z] - YYYY-MM-DD` entry above older entries for each stable or beta release.
 
+## [1.4.0] - Unreleased
+
+Requires LancerLogin Core `>=2.1.0-beta.13 <3.0.0` (module SDK `^1.9.0`). [Release notes](docs/releases/v1.4.0.md).
+
+### Added
+
+- **Name on reminder comments** on the **Reminders** tab in **Settings > Modules > Part Requests**: Core's `NotionCommentNameField` for `part-requests`, the name Notion shows as the author of reminder comments. Core stores it; left blank, comments show Part Requests. Admin only, like the rest of the tab.
+
 ## [1.3.0] - 2026-11-27
 
 Requires LancerLogin Core `>=2.1.0-beta.12 <3.0.0` (module SDK `^1.8.0`). [Release notes](docs/releases/v1.3.0.md).
