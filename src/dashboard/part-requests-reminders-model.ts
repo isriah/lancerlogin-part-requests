@@ -104,3 +104,13 @@ export function peopleNote(view: Pick<RemindersView, "people" | "core">): string
   if (!view.people.current) return "The People database chosen in Core changed. Check it again.";
   return "Pings use the People database: Notion account, then LancerLogin member ID, then the member's Discord account.";
 }
+
+/** Said under a days field while its value is a testing threshold in minutes, which the days field cannot show. */
+export const testingThresholdNote = (minutes: number) => `Using the testing threshold under Advanced: ${durationLabel(minutes)}.`;
+
+/** The People card's one status: in use, chosen but waiting for a check, or not chosen. */
+export function peopleBadge(view: Pick<RemindersView, "people" | "core">): Badge {
+  if (view.people && view.people.current && !view.people.error) return { label: "In use", tone: "success" };
+  if (view.core.peopleBound) return { label: "Check needed", tone: "warning" };
+  return { label: "Not chosen", tone: "neutral" };
+}

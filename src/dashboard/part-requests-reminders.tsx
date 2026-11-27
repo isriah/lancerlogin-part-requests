@@ -6,7 +6,7 @@ import { NotionBindingField } from "@lancerlogin/module-sdk/dashboard";
 import { errorText, request, RequestError } from "./part-requests-http.ts";
 import { formatDateTime, notionPageLink } from "./part-requests-model.ts";
 import {
-  daysToMinutes, durationLabel, lastRunSummary, minutesToDays, peopleNote, reminderProblemText, remindersBadge, remindersRoute, scheduleText, skipText, stepText, testingThreshold,
+  daysToMinutes, durationLabel, lastRunSummary, minutesToDays, peopleBadge, peopleNote, reminderProblemText, remindersBadge, remindersRoute, scheduleText, skipText, stepText, testingThreshold, testingThresholdNote,
   unpingedText, weekdayNames, type PreviewResult, type RemindersView, type RequestLink,
 } from "./part-requests-reminders-model.ts";
 import { Field, fieldAria, LoadState, Notice, Pill, type NoticeValue } from "./part-requests-ui";
@@ -35,7 +35,7 @@ export function RemindersTab() {
 
 function RequestList({ items, empty }: { items: readonly (RequestLink & { note?: string })[]; empty?: string }) {
   if (!items.length) return empty ? <p className="field-help pr-notice">{empty}</p> : null;
-  return <ul className="pr-layout">{items.map((item, index) => {
+  return <ul className="pr-run-list">{items.map((item, index) => {
     const link = notionPageLink(item.pageUrl);
     return <li key={`${item.pageUrl}-${index}`}>
       {link ? <a href={link} target="_blank" rel="noopener noreferrer">{item.description || "(no description)"}<span aria-hidden="true"> ↗</span><span className="visually-hidden"> in Notion, new tab</span></a> : item.description}
@@ -51,6 +51,12 @@ function StatusCard({ view, onView, reload }: { view: RemindersView; onView: (vi
   const [preview, setPreview] = useState<PreviewResult>();
   const problem = reminderProblemText(view.problem, undefined, view.problemMs);
   const comment = view.core.capabilities.comment; const update = view.core.capabilities.update;
+  const canCheck = !busy && view.core.ordersBound && view.core.connected;
+  const canPreview = !busy && view.targetVerified;
+  const canSend = !busy && view.settings.enabled && view.targetVerified && !view.activeRun;
+  // One primary button per row, and never a disabled one: the next step an Admin should take.
+  const primary: "verify" | "run" | "" = !view.targetVerified ? (canCheck ? "verify" : "") : canSend ? "run" : "";
+  const buttonClass = (kind: "verify" | "preview" | "run") => `ui-button${primary === kind ? " ui-button--primary" : ""}`;
 
   async function act(kind: "verify" | "preview" | "run") {
     if (busy) return;
@@ -84,10 +90,10 @@ function StatusCard({ view, onView, reload }: { view: RemindersView; onView: (vi
       <div><dt>Next run</dt><dd>{view.activeRun ? "Running now" : view.nextRunMs ? formatDateTime(view.nextRunMs) : view.settings.enabled ? "Not scheduled" : "Reminders are off"}</dd></div>
       <div><dt>Threshold and cooldown</dt><dd>{durationLabel(view.settings.staleMinutes)}, then {durationLabel(view.settings.cooldownMinutes)}</dd></div>
     </dl>
-    <div className="module-actions">
-      <button className={`ui-button${view.targetVerified ? "" : " ui-button--primary"}`} type="button" disabled={Boolean(busy) || !view.core.ordersBound || !view.core.connected} onClick={() => void act("verify")}>{busy === "verify" ? "Checking..." : view.targetVerified ? "Check again" : "Check ordering database"}</button>
-      <button className="ui-button" type="button" disabled={Boolean(busy) || !view.targetVerified} onClick={() => void act("preview")}>{busy === "preview" ? "Reading Notion..." : "Preview"}</button>
-      <button className="ui-button ui-button--primary" type="button" disabled={Boolean(busy) || !view.settings.enabled || !view.targetVerified || Boolean(view.activeRun)} onClick={() => void act("run")}>{busy === "run" ? "Starting..." : "Send reminders now"}</button>
+    <div className="module-actions pr-actions">
+      <button className={buttonClass("verify")} type="button" disabled={!canCheck} onClick={() => void act("verify")}>{busy === "verify" ? "Checking..." : view.targetVerified ? "Check again" : "Check ordering database"}</button>
+      <button className={buttonClass("preview")} type="button" disabled={!canPreview} onClick={() => void act("preview")}>{busy === "preview" ? "Reading Notion..." : "Preview"}</button>
+      <button className={buttonClass("run")} type="button" disabled={!canSend} onClick={() => void act("run")}>{busy === "run" ? "Starting..." : "Send reminders now"}</button>
     </div>
     {preview && <PreviewList preview={preview} />}
   </section>;
@@ -103,7 +109,7 @@ function PreviewList({ preview }: { preview: PreviewResult }) {
         return <tr key={`${row.pageUrl}-${index}`}>
           <th scope="row">{link ? <a href={link} target="_blank" rel="noopener noreferrer">{row.description || "(no description)"}<span aria-hidden="true"> ↗</span><span className="visually-hidden"> in Notion, new tab</span></a> : row.description}</th>
           <td data-label="Created">{formatDateTime(row.createdMs)}</td>
-          <td data-label="People">{row.people.length ? row.people.map((person, position) => <span key={position} className="pr-row-note">{person.name}{person.ping ? ", pinged" : `, no ping: ${unpingedText(person.reason ?? "")}`}</span>) : "Nobody"}</td>
+          <td data-label="People">{row.people.length ? <span className="pr-cell-lines">{row.people.map((person, position) => <span key={position}>{person.name}{person.ping ? ", pinged" : `, no ping: ${unpingedText(person.reason ?? "")}`}</span>)}</span> : "Nobody"}</td>
           <td data-label="Outcome">{skipText(row.skipReason)}</td>
         </tr>;
       })}</tbody>
@@ -138,33 +144,39 @@ function SettingsCard({ view, onView }: { view: RemindersView; onView: (view: Re
       });
       onView(next);
     } catch (caught) {
-      if (caught instanceof RequestError && caught.errors) setErrors({ ...caught.errors });
-      setResult({ notice: { tone: "error", content: errorText(caught, "Reminder settings could not be saved.") }, key: Date.now() });
+      const fields = caught instanceof RequestError && caught.errors && Object.keys(caught.errors).length ? caught.errors : undefined;
+      if (fields) setErrors({ ...fields });
+      setResult({ notice: { tone: "error", content: fields ? "Check the highlighted fields." : errorText(caught, "Reminder settings could not be saved.") }, key: Date.now() });
     } finally { setBusy(false); }
   }
   const days = (text: string, set: (minutes: number) => void, setText: (text: string) => void) => { setText(text); const minutes = daysToMinutes(text); if (minutes !== undefined) set(minutes); };
+  // A threshold that is not whole days leaves the days field empty, so it says where the value is instead, and Advanced starts open.
+  const inMinutes = (minutes: number) => minutesToDays(minutes) ? undefined : testingThresholdNote(minutes);
+  const [advancedOpen, setAdvancedOpen] = useState(!minutesToDays(initial.staleMinutes) || !minutesToDays(initial.cooldownMinutes));
 
   return <form className="ui-card pr-stack" aria-labelledby={`${ids}title`} onSubmit={(event) => void save(event)} noValidate>
     <div className="pr-card-heading"><h2 id={`${ids}title`}>Settings</h2></div>
     {result && <Notice notice={result.notice} focusKey={result.key} />}
-    <label className="pr-choice"><input type="checkbox" role="switch" checked={enabled} disabled={busy || (!view.targetVerified && !enabled)} aria-describedby={`${ids}enabled-help`} onChange={(event) => setEnabled(event.target.checked)} /><span>Send stale-request reminders</span></label>
-    <p id={`${ids}enabled-help`} className="field-help pr-notice">{view.targetVerified ? "Turning this off stops a run in progress. Sending requests is never affected." : "Check the ordering database for reminders first."}</p>
+    <div className="pr-field pr-switch-field">
+      <label className="pr-choice"><input type="checkbox" role="switch" checked={enabled} disabled={busy || (!view.targetVerified && !enabled)} aria-describedby={`${ids}enabled-help`} onChange={(event) => setEnabled(event.target.checked)} /><span>Send stale-request reminders</span></label>
+      <span id={`${ids}enabled-help`} className="field-help">{view.targetVerified ? "Turning this off stops a run in progress. Sending requests is never affected." : "Check the ordering database for reminders first."}</span>
+    </div>
     <div className="pr-field" data-invalid={errors.weekdays ? "true" : undefined}>
-      <span id={`${ids}days-label`}>Days</span>
-      <div className="pr-chips" role="group" aria-labelledby={`${ids}days-label`}>{weekdayNames.map(([day, name]) =>
+      <span id={`${ids}days-label`} className="pr-field-label">Days</span>
+      <div className="pr-chips" role="group" aria-labelledby={`${ids}days-label`} aria-describedby={errors.weekdays ? `${ids}days-error` : undefined}>{weekdayNames.map(([day, name]) =>
         <button className="pr-chip" type="button" key={day} aria-pressed={weekdays.includes(day)} disabled={busy} onClick={() => toggleDay(day)}>{name}</button>)}</div>
-      {errors.weekdays && <span className="field-help pr-field-error">{errors.weekdays}</span>}
+      {errors.weekdays && <span id={`${ids}days-error`} className="field-help pr-field-error">{errors.weekdays}</span>}
     </div>
     <Field id={`${ids}time`} label="Time" help={`In the installation's time zone${view.timeZone ? `, ${view.timeZone}` : ""}.`} error={errors.runTime}>
       <input {...fieldAria(`${ids}time`, errors.runTime)} className="ui-control" type="time" step={60} required value={runTime} disabled={busy} onChange={(event) => setRunTime(event.target.value)} />
     </Field>
-    <Field id={`${ids}stale`} label="Remind after (days)" help="How long a request can stay an Incomplete Request before its people are reminded." error={errors.staleMinutes}>
-      <input {...fieldAria(`${ids}stale`, errors.staleMinutes)} className="ui-control" type="number" min={1} max={30} step={1} inputMode="numeric" value={staleDays} disabled={busy} onChange={(event) => days(event.target.value, setStaleMinutes, setStaleDays)} />
+    <Field id={`${ids}stale`} label="Remind after (days)" help={inMinutes(staleMinutes) ?? "How long a request can stay an Incomplete Request before its people are reminded."} error={errors.staleMinutes}>
+      <input {...fieldAria(`${ids}stale`, errors.staleMinutes)} className="ui-control" type="number" min={1} max={30} step={1} inputMode="numeric" placeholder={staleDays ? undefined : "Testing threshold"} value={staleDays} disabled={busy} onChange={(event) => days(event.target.value, setStaleMinutes, setStaleDays)} />
     </Field>
-    <Field id={`${ids}cooldown`} label="Remind again after (days)" help="The shortest time between two reminders for the same request." error={errors.cooldownMinutes}>
-      <input {...fieldAria(`${ids}cooldown`, errors.cooldownMinutes)} className="ui-control" type="number" min={1} max={30} step={1} inputMode="numeric" value={cooldownDays} disabled={busy} onChange={(event) => days(event.target.value, setCooldownMinutes, setCooldownDays)} />
+    <Field id={`${ids}cooldown`} label="Remind again after (days)" help={inMinutes(cooldownMinutes) ?? "The shortest time between two reminders for the same request."} error={errors.cooldownMinutes}>
+      <input {...fieldAria(`${ids}cooldown`, errors.cooldownMinutes)} className="ui-control" type="number" min={1} max={30} step={1} inputMode="numeric" placeholder={cooldownDays ? undefined : "Testing threshold"} value={cooldownDays} disabled={busy} onChange={(event) => days(event.target.value, setCooldownMinutes, setCooldownDays)} />
     </Field>
-    <details className="settings-disclosure">
+    <details className="settings-disclosure" open={advancedOpen} onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}>
       <summary>Advanced (testing)</summary>
       <div className="pr-stack">
         <Field id={`${ids}stale-minutes`} label="Remind after (minutes)" help="For testing on a sandbox. Below one day, every Incomplete Request becomes stale almost at once.">
@@ -181,11 +193,11 @@ function SettingsCard({ view, onView }: { view: RemindersView; onView: (view: Re
     </Field>
     <Field id={`${ids}key`} label="People database member ID" help="Which ID the People database's LancerLogin member ID column holds." error={errors.peopleKey}>
       <select {...fieldAria(`${ids}key`, errors.peopleKey)} className="ui-control" value={peopleKey} disabled={busy} onChange={(event) => setPeopleKey(event.target.value as "external_id" | "id")}>
-        <option value="external_id">The member ID members type (recommended)</option>
-        <option value="id">LancerLogin's internal member ID</option>
+        <option value="external_id">Typed member ID (recommended)</option>
+        <option value="id">Internal LancerLogin ID</option>
       </select>
     </Field>
-    <div className="module-actions"><button className="ui-button ui-button--primary" type="submit" disabled={busy}>{busy ? "Saving..." : "Save settings"}</button></div>
+    <div className="module-actions pr-actions"><button className="ui-button ui-button--primary" type="submit" disabled={busy}>{busy ? "Saving..." : "Save settings"}</button></div>
   </form>;
 }
 
@@ -204,14 +216,15 @@ function PeopleCard({ view, onView, reload }: { view: RemindersView; onView: (vi
     finally { setBusy(false); }
   }
   const usable = Boolean(view.people && view.people.current && !view.people.error);
-  return <section className="ui-card pr-stack" aria-labelledby={`${ids}title`}>
-    <div className="pr-card-heading"><h2 id={`${ids}title`}>People database</h2><Pill badge={usable ? { label: "In use", tone: "success" } : { label: "Optional", tone: "neutral" }} /></div>
+  // Core's picker brings its own card, heading, description and pill; this card's heading and pill stand for both (see the CSS).
+  return <section className="ui-card pr-stack pr-people" aria-labelledby={`${ids}title`}>
+    <div className="pr-card-heading"><h2 id={`${ids}title`}>People database</h2><Pill badge={peopleBadge(view)} /></div>
     <p className="field-help pr-notice">Optional and read only. Reminders look up each Notion person's LancerLogin member ID in it (columns Notion account, LancerLogin member ID and Active) to find who to ping in Discord. Part Requests never writes to it.</p>
     {result && <Notice notice={result.notice} focusKey={result.key} />}
     <p className="ui-status settings-notice pr-notice" data-tone={usable ? "success" : view.people?.error || (view.people && !view.people.current) ? "warning" : undefined} role="status">{peopleNote(view)}</p>
     {view.core.connected && <NotionBindingField moduleId="part-requests" bindingId="people" onChanged={(bound) => { if (bound !== view.core.peopleBound) void reload(); }} />}
-    <div className="module-actions">
-      <button className="ui-button" type="button" disabled={busy || !view.core.peopleBound} onClick={() => void act("POST")}>{busy ? "Checking..." : view.people ? "Check People again" : "Check People"}</button>
+    <div className="module-actions pr-actions">
+      <button className={`ui-button${view.core.peopleBound && !usable && !busy ? " ui-button--primary" : ""}`} type="button" disabled={busy || !view.core.peopleBound} onClick={() => void act("POST")}>{busy ? "Checking..." : view.people ? "Check People again" : "Check People"}</button>
       {view.people && <button className="ui-button" type="button" disabled={busy} onClick={() => void act("DELETE")}>Stop using People</button>}
     </div>
   </section>;
@@ -230,10 +243,18 @@ function LastRunCard({ view }: { view: RemindersView }) {
       <div><dt>Notion problems</dt><dd className="pr-summary-value">{counts.notionFailed + counts.uncertain}</dd><dd className="pr-summary-note">{counts.uncertain} to check</dd></div>
     </dl>
     {run.truncated && <p className="ui-status settings-notice pr-notice" data-tone="warning" role="status">This run stopped at 200 requests. The rest are reminded on the next run.</p>}
-    {run.checkPage.length > 0 && <><h3>Check the page</h3><p className="field-help pr-notice">Notion did not confirm these comments. Look at each request: if the comment is missing, the next run after the cooldown adds it.</p><RequestList items={run.checkPage} /></>}
-    {run.failed.length > 0 && <><h3>Not completed</h3><RequestList items={run.failed.map((item) => ({ ...item, note: stepText(item.step) }))} /></>}
-    {run.nobody.length > 0 && <><h3>Nobody set</h3><p className="field-help pr-notice">These have no Orderer/Recipient, so nobody could be reminded.</p><RequestList items={run.nobody} /></>}
-    {run.pingSkipped.length > 0 && <><h3>Ping skipped</h3><p className="field-help pr-notice">These were commented on in Notion, but some people were not pinged in Discord.</p>
-      <RequestList items={run.pingSkipped.map((item) => ({ ...item, note: item.people.map((person) => `${person.name}: ${unpingedText(person.reason)}`).join("; ") }))} /></>}
+    {run.checkPage.length > 0 && <RunSection title="Check the page" help="Notion did not confirm these comments. Look at each request: if the comment is missing, the next run after the cooldown adds it." items={run.checkPage} />}
+    {run.failed.length > 0 && <RunSection title="Not completed" items={run.failed.map((item) => ({ ...item, note: stepText(item.step) }))} />}
+    {run.nobody.length > 0 && <RunSection title="Nobody set" help="These have no Orderer/Recipient, so nobody could be reminded." items={run.nobody} />}
+    {run.pingSkipped.length > 0 && <RunSection title="Ping skipped" help="These were commented on in Notion, but some people were not pinged in Discord."
+      items={run.pingSkipped.map((item) => ({ ...item, note: item.people.map((person) => `${person.name}: ${unpingedText(person.reason)}`).join("; ") }))} />}
   </section>;
+}
+
+function RunSection({ title, help, items }: { title: string; help?: string; items: readonly (RequestLink & { note?: string })[] }) {
+  return <div className="pr-run-section">
+    <h3>{title}</h3>
+    {help && <p className="field-help pr-notice">{help}</p>}
+    <RequestList items={items} />
+  </div>;
 }
