@@ -1,8 +1,9 @@
 // Settings > Part Requests > Reminders, Admin only: stale-request reminders. Reminders always use the ordering database chosen
-// on the Connection tab; this tab checks its layout for reminders, places Core's picker for the optional People database,
-// holds the schedule and thresholds, previews a run without sending anything, and shows the last run.
+// on the Connection tab; this tab checks its layout for reminders, places Core's picker for the optional People database
+// and Core's field for the name Notion shows on reminder comments, holds the schedule and thresholds, previews a run
+// without sending anything, and shows the last run.
 import { useEffect, useId, useState, type FormEvent } from "react";
-import { NotionBindingField } from "@lancerlogin/module-sdk/dashboard";
+import { NotionBindingField, NotionCommentNameField } from "@lancerlogin/module-sdk/dashboard";
 import { errorText, request, RequestError } from "./part-requests-http.ts";
 import { formatDateTime, notionPageLink } from "./part-requests-model.ts";
 import {
@@ -27,6 +28,7 @@ export function RemindersTab() {
     {view && <>
       <StatusCard view={view} onView={setView} reload={load} />
       <SettingsCard key={view.settings.revision} view={view} onView={setView} />
+      <CommentNameCard />
       <PeopleCard view={view} onView={setView} reload={load} />
       {view.lastRun && <LastRunCard view={view} />}
     </>}
@@ -199,6 +201,16 @@ function SettingsCard({ view, onView }: { view: RemindersView; onView: (view: Re
     </Field>
     <div className="module-actions pr-actions"><button className="ui-button ui-button--primary" type="submit" disabled={busy}>{busy ? "Saving..." : "Save settings"}</button></div>
   </form>;
+}
+
+function CommentNameCard() {
+  const ids = useId();
+  // Core stores the name and loads and saves it itself; like the People card, this card's heading stands for Core's (see the CSS).
+  return <section className="ui-card pr-stack pr-comment-name" aria-labelledby={`${ids}title`}>
+    <div className="pr-card-heading"><h2 id={`${ids}title`}>Name on reminder comments</h2></div>
+    <p className="field-help pr-notice">The name Notion shows as the author of each reminder comment in the ordering database.</p>
+    <NotionCommentNameField moduleId="part-requests" />
+  </section>;
 }
 
 function PeopleCard({ view, onView, reload }: { view: RemindersView; onView: (view: RemindersView) => void; reload: () => Promise<void> }) {

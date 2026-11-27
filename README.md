@@ -2,12 +2,13 @@
 
 Students click a browser extension on a vendor's product page, review the details and create a request in the team's Notion ordering database. LancerLogin Core holds the Notion token, in its shared Notion connection. Students never sign in to LancerLogin.
 
-**Needs Core's Notion connection: LancerLogin Core 2.1.0-beta.12 / module SDK 1.8.0 or later.** From 1.2.0 the plugin keeps no Notion token of its own. Core saves it in **Settings > Integrations > Notion** and sends every Notion request; the plugin names its `orders` binding, the ordering database an Admin chooses for it. An installation coming from 1.1 needs nothing done: see [Moving from 1.1](#moving-from-11).
+**Needs Core's Notion connection: LancerLogin Core 2.1.0-beta.13 / module SDK 1.9.0 or later.** From 1.2.0 the plugin keeps no Notion token of its own. Core saves it in **Settings > Integrations > Notion** and sends every Notion request; the plugin names its `orders` binding, the ordering database an Admin chooses for it. An installation coming from 1.1 needs nothing done: see [Moving from 1.1](#moving-from-11).
 
-**Status: v1.3.0.** The backend and the Admin pages are built: pairing, the Notion connection, the device API, the request log, the recipient job, [stale-request reminders](#stale-request-reminders), Core's setup screen and **Settings > Modules > Part Requests**. Carts here means reading open orders and recording who built a cart. Filling store carts belongs to the extension.
+**Status: v1.4.0.** The backend and the Admin pages are built: pairing, the Notion connection, the device API, the request log, the recipient job, [stale-request reminders](#stale-request-reminders), Core's setup screen and **Settings > Modules > Part Requests**. Carts here means reading open orders and recording who built a cart. Filling store carts belongs to the extension.
 
 | Plugin | LancerLogin Core | Module SDK | Module contract |
 | --- | --- | --- | --- |
+| 1.4.x | `>=2.1.0-beta.13 <3.0.0` | `^1.9.0` | 1 |
 | 1.3.x | `>=2.1.0-beta.12 <3.0.0` | `^1.8.0` | 1 |
 | 1.2.x | `>=2.1.0-beta.12 <3.0.0` | `^1.8.0` | 1 |
 | 1.1.x | `>=2.1.0-beta.7 <3.0.0` | `^1.6.0` | 1 |
@@ -21,7 +22,7 @@ Students click a browser extension on a vendor's product page, review the detail
 - **Connection:** any problem and its fix at the top, then Core's Notion connection (with a link to **Settings > Integrations > Notion**, where the token is saved), the ordering database, last verified time, site address and Open setup, which reopens Core's setup screen; Core's own database picker for the `orders` binding, with **Use the previous ordering database** while Core has none chosen or a different one; **Verify connection**, which checks the chosen database's layout; the recipient list with Refresh now; pairing, with a notice while it is paused; and the Carts switch. Old `?section=setup` and `?section=status` links open this section.
 - **Requests log:** every request with its member and device, newest first, with a banner when any result is uncertain.
 - **Paired devices:** counts, search by name or device, and filters for No devices, At the limit, Inactive 30+ days and Off roster, then one compact row per member by name, including members with no devices. A row opens to that member's devices, with Revoke. **Generate pairing PIN** makes a PIN for a chosen member, for example one without Discord: the same PIN `/ordering-pin` makes, shown once with its expiry, the site address and a Copy button, and removed from the screen when it expires or the dialog closes. Inactive is a prompt to look, not a reason to revoke: last used only changes when a device sends a request or marks a cart item.
-- **Reminders:** stale-request reminders: a status card with **Check ordering database**, **Preview** and **Send reminders now**; the settings form; Core's picker for the optional People database, with **Check People**; and the last run. See [Stale-request reminders](#stale-request-reminders).
+- **Reminders:** stale-request reminders: a status card with **Check ordering database**, **Preview** and **Send reminders now**; the settings form; Core's field for the name Notion shows on reminder comments; Core's picker for the optional People database, with **Check People**; and the last run. See [Stale-request reminders](#stale-request-reminders).
 
 Core shows its own setup screen by itself until setup is complete, and an Admin can reopen it from Connection. When Notion answers 401, 403 or 404 to a request or an orders read, or the refresh job gets a 403 or 404 reading the database or a 401 from any call, the code and time are recorded and Connection shows the rejected token or lost access at the top instead of Connected. A 500, a 429 and Core's own refusals record nothing. It clears on a successful verify or the next call that reaches the database, so a brief glitch doesn't stick. Listing users is not such a call. It doesn't stop requests or change what students are told: each call still tries Notion and reports its own result, and Carts can serve its copy for a while.
 
@@ -221,6 +222,7 @@ A threshold of exactly one day reads "1 day", and one below a day, for testing, 
 2. Press **Check ordering database**. It reads the layout through Core and saves it; a failed check saves nothing.
 3. Optionally choose the **People database** with Core's picker and press **Check People**. It needs Notion account (people), LancerLogin member ID (text) and Active (checkbox), and is only ever read.
 4. Choose the days, time, thresholds and the Discord channel (required while reminders are on), turn reminders on and save. **Preview** lists what the next run would do without sending or changing anything; **Send reminders now** starts a run at once.
+5. Optionally set **Name on reminder comments**, the author Notion shows on each reminder comment. Core stores it; left blank, comments show Part Requests.
 
 **Who gets pinged.** With a checked People database: Notion account, then its LancerLogin member ID (by default the ID members type, the roster's external ID), then that active member's Discord account. A Notion account or member ID on more than one active row is ambiguous, and nobody is pinged for it. Without People, or while it has no active rows: the one active member who chose that person as their default recipient, which may be a mentor. Inactive members and members without a linked Discord account are not pinged. Everyone on the request is still mentioned in the Notion comment, and the last run lists each skipped ping and why.
 

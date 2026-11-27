@@ -18,10 +18,10 @@ test("package.json, the manifest and plugin-release.json agree", () => {
   assert.equal(manifest.tablePrefix, "part_requests_");
   assert.equal(manifest.tablePrefix, pkg.lancerlogin.tablePrefix);
   assert.equal(pkg.name, `lancerlogin-module-${manifest.id}`);
-  assert.equal(pkg.version, "1.3.0");
-  assert.equal(pkg.lancerlogin.core, ">=2.1.0-beta.12 <3.0.0", "the first Core with its Notion connection");
-  assert.equal(pkg.peerDependencies["@lancerlogin/module-sdk"], "^1.8.0", "services.notion and NotionBindingField");
-  assert.equal(release.core.tag, "v2.1.0-beta.12");
+  assert.equal(pkg.version, "1.4.0");
+  assert.equal(pkg.lancerlogin.core, ">=2.1.0-beta.13 <3.0.0", "the first Core that stores a module's Notion comment name");
+  assert.equal(pkg.peerDependencies["@lancerlogin/module-sdk"], "^1.9.0", "services.notion, NotionBindingField and NotionCommentNameField");
+  assert.equal(release.core.tag, "v2.1.0-beta.13");
   assert.match(release.core.commit, /^[0-9a-f]{40}$/);
 });
 
@@ -45,6 +45,23 @@ test("Notion: the required ordering database and the optional read-only People d
     const source = read(`src/${name}`);
     assert.doesNotMatch(source, /\bfetch\(|api\.notion\.com|Notion-Version/, name);
   }
+});
+
+test("the Reminders tab places Core's Notion comment name field for part-requests, once, between Settings and People", () => {
+  // The dashboard is not rendered in these tests (no React here), so this reads the tab's source as Core's composer would see it.
+  const source = read("src/dashboard/part-requests-reminders.tsx");
+  // Matched as text, without a quoted specifier after "from": Core's composer checks every import it finds, tests included.
+  const sdkImport = source.split(/\r?\n/).find((line) => line.startsWith("import {") && line.endsWith(`"@lancerlogin/module-sdk/dashboard";`));
+  assert.match(sdkImport ?? "", /\bNotionCommentNameField\b/, "imported from the module SDK's dashboard entry");
+  assert.deepEqual([...source.matchAll(/<NotionCommentNameField\b[^>]*\/>/g)].map((match) => match[0]), ['<NotionCommentNameField moduleId="part-requests" />']);
+  const card = source.slice(source.indexOf("function CommentNameCard()"), source.indexOf("function PeopleCard("));
+  assert.match(card, /<NotionCommentNameField moduleId="part-requests" \/>/, "inside the comment name card");
+  const tab = source.slice(source.indexOf("export function RemindersTab()"), source.indexOf("function RequestList("));
+  const order = ["<StatusCard", "<SettingsCard", "<CommentNameCard />", "<PeopleCard", "<LastRunCard"].map((tag) => tab.indexOf(tag));
+  assert.ok(order.every((position) => position >= 0), "every card is on the tab");
+  assert.deepEqual(order, [...order].sort((a, b) => a - b));
+  // The tab is reached only through the Admin settings page; the manifest declares no other page that could place it.
+  assert.deepEqual(readdirSync(new URL("src/dashboard/", root)).filter((name) => read(`src/dashboard/${name}`).includes("<RemindersTab")), ["part-requests-settings.tsx"]);
 });
 
 test("the route families and the one Admin settings page are declared", () => {
