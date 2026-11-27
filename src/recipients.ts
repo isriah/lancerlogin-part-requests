@@ -1,8 +1,8 @@
 // The refresh job: re-reads the database's layout, then workspace members, then people named on existing requests, then any
 // missing names. It makes one Notion call per scheduler slice and keeps its place in the database, which is what Workers
 // Free's 10 ms CPU limit asks of a job. Every module write pokes jobs, so it first checks whether a run is due.
-import { clearRefusal, insertRefused, parseSchema, readConnection, recordRefusal, savedToken, type ConnectionRow, type Credentials } from "./connection.ts";
-import { AppError, NotionClient, type Person, type Schema } from "./notion.ts";
+import { adoptLegacyToken, clearRefusal, insertRefused, parseSchema, readConnection, readCore, recordRefusal, type ConnectionRow, type NotionServices } from "./connection.ts";
+import { AppError, OrdersNotion, sameId, type Person, type Schema } from "./notion.ts";
 import { installationId, type Database } from "./pairing.ts";
 
 /** The copy of open orders is short-lived, so a day-old one is nobody's: people's names and prices should not sit here unused. */
@@ -25,7 +25,7 @@ const cronSlices = 5;
 const usersForbidden = "notion_users_403";
 
 type Refresh = { readonly step: string; readonly cursor: string | null; readonly pages: number; readonly nextDue: number };
-type JobContext = { readonly db: unknown; readonly services: { readonly credentials: Credentials }; readonly scheduler?: { readonly steps: boolean } };
+type JobContext = { readonly db: unknown; readonly services: NotionServices; readonly scheduler?: { readonly steps: boolean } };
 
 const setState = (db: Database, step: string, cursor: string | null, pages: number) =>
   db.prepare(`INSERT INTO part_requests_recipient_refresh(installation_id,step,cursor,pages,next_due_ms) VALUES (?,?,?,?,0)
@@ -50,10 +50,10 @@ const finishRun = (db: Database, now: number, error: string | null, retryMs: num
 ]);
 
 /** One step, at most one Notion call. Returns whether the run has more to do. */
-async function slice(db: Database, refresh: Refresh, connection: ConnectionRow, schema: Schema, client: NotionClient, now: number): Promise<boolean> {
+async function slice(db: Database, refresh: Refresh, connection: ConnectionRow, schema: Schema, client: OrdersNotion, now: number): Promise<boolean> {
   if (refresh.step === "idle" || refresh.step === "schema") {
     try {
-      const fresh = await client.readSchema(schema.dataSourceId, schema.databaseId, schema);
+      const fresh = await client.readSchema(schema);
       await db.batch([
         db.prepare("UPDATE part_requests_notion SET schema_json=?,schema_error=NULL WHERE installation_id=? AND data_source_id=?").bind(JSON.stringify(fresh), installationId, connection.dataSourceId),
         setState(db, "users", null, 0),
@@ -69,7 +69,7 @@ async function slice(db: Database, refresh: Refresh, connection: ConnectionRow, 
     return true;
   }
   if (refresh.step === "users") {
-    let page: Awaited<ReturnType<NotionClient["usersPage"]>>;
+    let page: Awaited<ReturnType<OrdersNotion["usersPage"]>>;
     try { page = await client.usersPage(refresh.cursor ?? undefined); }
     catch (error) {
       if (!(error instanceof AppError) || error.code !== "notion_403") throw error;
@@ -100,7 +100,11 @@ async function slice(db: Database, refresh: Refresh, connection: ConnectionRow, 
   }
   let name = "";
   try { name = await client.userName(nameless.id); }
-  catch (error) { if (!(error instanceof AppError) || error.code === "notion_401") throw error; }
+  catch (error) {
+    // A 401, a rate limit (Core's shared pause included) and Core's own refusals say nothing about this person: the run stops
+    // and the name is looked up again next time. Anything else Notion answers means no name.
+    if (!(error instanceof AppError) || error.code === "notion_401" || error.code === "notion_429" || !/^notion_(?:\d+|network|response)$/.test(error.code)) throw error;
+  }
   await db.prepare("UPDATE part_requests_recipients SET name=?,name_checked=1 WHERE installation_id=? AND notion_user_id=?").bind(name.slice(0, 200), installationId, nameless.id).run();
   return true;
 }
@@ -111,23 +115,27 @@ const readsDatabase = (step: string) => step === "idle" || step === "schema" || 
 export async function refreshRecipients(context: JobContext): Promise<unknown> {
   const db = context.db as Database;
   const now = Date.now();
-  const [connection, state] = await Promise.all([
+  const [saved, state] = await Promise.all([
     readConnection(db),
     db.prepare("SELECT step,cursor,pages,next_due_ms AS nextDue FROM part_requests_recipient_refresh WHERE installation_id=?").bind(installationId).first<Refresh>(),
   ]);
+  // A token Part Requests 1.1 saved goes to Core on the first run that finds it, whether or not a refresh is due.
+  const connection = saved?.ciphertext ? await adoptLegacyToken(db, context.services, saved, now) : saved;
   const schema = parseSchema(connection);
-  if (!connection || !connection.ciphertext || !connection.verifiedMs || !schema) return { skipped: "not connected" };
+  if (!connection || !connection.verifiedMs || !connection.dataSourceId || !schema) return { skipped: "not connected" };
   if (state?.step === "idle" && state.nextDue > now) return { skipped: "not due" };
   // The row must exist before any failure, or the next poke would call Notion again straight away.
   if (!state) await setState(db, "idle", null, 0).run();
   let refresh: Refresh = state ?? { step: "idle", cursor: null, pages: 0, nextDue: 0 };
-  let client: NotionClient;
-  try { client = new NotionClient(await savedToken(connection, context.services.credentials)); }
-  catch (error) {
-    if (!(error instanceof AppError)) throw error;
-    await finishRun(db, now, error.code, refreshRetryMs);
-    return { failed: error.code };
+  // Core's connection must be usable and still bound to the database whose layout was checked. Otherwise wait for the next
+  // try, as a failed run does, rather than read Core again on every poke. Verifying pokes the job again.
+  const core = await readCore(context.services.notion);
+  const unready = !core.status.connected ? "notion_not_connected" : !core.binding ? "notion_unbound" : !sameId(core.binding.dataSourceId, connection.dataSourceId) ? "notion_not_verified" : undefined;
+  if (unready) {
+    await finishRun(db, now, unready, refreshRetryMs);
+    return { failed: unready };
   }
+  const client = new OrdersNotion(context.services.notion);
   const steps = context.scheduler?.steps === true;
   let current = connection;
   let step = refresh.step;

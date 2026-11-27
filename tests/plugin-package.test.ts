@@ -18,10 +18,27 @@ test("package.json, the manifest and plugin-release.json agree", () => {
   assert.equal(manifest.tablePrefix, "part_requests_");
   assert.equal(manifest.tablePrefix, pkg.lancerlogin.tablePrefix);
   assert.equal(pkg.name, `lancerlogin-module-${manifest.id}`);
-  assert.equal(pkg.lancerlogin.core, ">=2.1.0-beta.7 <3.0.0");
-  assert.equal(pkg.peerDependencies["@lancerlogin/module-sdk"], "^1.6.0");
+  assert.equal(pkg.version, "1.2.0");
+  assert.equal(pkg.lancerlogin.core, ">=2.1.0-beta.12 <3.0.0", "the first Core with its Notion connection");
+  assert.equal(pkg.peerDependencies["@lancerlogin/module-sdk"], "^1.8.0", "services.notion and NotionBindingField");
   assert.equal(release.core.tag, "v2.1.0-beta.7");
   assert.match(release.core.commit, /^[0-9a-f]{40}$/);
+});
+
+test("Notion: one required ordering database with only the operations this version calls, user list and lookup, and no email", () => {
+  assert.deepEqual(manifest.notion, {
+    users: ["list", "retrieve"],
+    bindings: [{ id: "orders", label: "Ordering database", reason: "Part requests from the browser extension are added here, and Carts and the recipient list read it.", required: true, kind: "data_source", operations: ["retrieve", "query", "pages.create"] }],
+  });
+  // As Core validates them: plain text within its lengths.
+  const [orders] = manifest.notion.bindings;
+  assert.ok(orders.label.length <= 80 && orders.label.trim() === orders.label);
+  assert.ok(orders.reason.length <= 200 && orders.reason.trim() === orders.reason);
+  // No Notion request leaves the plugin except through Core: no fetch, no API host, no Notion headers.
+  for (const name of readdirSync(new URL("src/", root)).filter((file) => file.endsWith(".ts"))) {
+    const source = read(`src/${name}`);
+    assert.doesNotMatch(source, /\bfetch\(|api\.notion\.com|Notion-Version/, name);
+  }
 });
 
 test("the route families and the one Admin settings page are declared", () => {

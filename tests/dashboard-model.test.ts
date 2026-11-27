@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  adminSection, adminSections, connectionProblem, databaseLink, formatDate, formatDateTime, formatShortDate, formatTime, deviceSummary, emptyMembersText, inactiveNote, inFilter, isConnected, memberFilters, memberFlag, memberLastUsed, memberRows, notionPageLink, offRosterNote, searchMatches, visibleMembers, pairingNotice, refreshNotice, requestRow, revokeMessage, uncertainBanner, uncertainNote, type Device, type MemberFilter,
+  adminSection, adminSections, connectionProblem, coreState, databaseLink, neededCapabilities, offerPrevious, formatDate, formatDateTime, formatShortDate, formatTime, deviceSummary, emptyMembersText, inactiveNote, inFilter, isConnected, memberFilters, memberFlag, memberLastUsed, memberRows, notionPageLink, offRosterNote, searchMatches, visibleMembers, pairingNotice, refreshNotice, requestRow, revokeMessage, uncertainBanner, uncertainNote, type Device, type MemberFilter,
 } from "../src/dashboard/part-requests-model.ts";
 
 const zone = "America/Los_Angeles";
@@ -116,26 +116,45 @@ test("the revoke message says what happens and how to undo it", () => {
   assert.equal(revokeMessage({ label: "School Chromebook", memberName: "Test Student A" }), "Test Student A's School Chromebook loses access at once. Its past requests stay in the log. To use it again, Test Student A runs /ordering-pin and pairs it again.");
 });
 
-test("the Connection tab's problem line says what stopped and what to do", () => {
-  assert.equal(connectionProblem({ tokenSaved: true, problem: null, schemaError: null }), undefined);
-  assert.match(connectionProblem({ tokenSaved: true, problem: "notion_schema_changed", schemaError: 'Notion property "SKU" is wrong.' })!, /no longer matches.*"SKU" is wrong/);
-  assert.match(connectionProblem({ tokenSaved: false, problem: "notion_not_connected", schemaError: null })!, /^No Notion token is saved.*after a restore/);
-  assert.match(connectionProblem({ tokenSaved: true, problem: "notion_not_connected", schemaError: null })!, /has not been verified/);
+test("the Connection tab's problem line says what stopped and what to do, and where in Core to fix it", () => {
+  assert.equal(connectionProblem({ problem: null, schemaError: null }), undefined);
+  assert.match(connectionProblem({ problem: "notion_schema_changed", schemaError: 'Notion property "SKU" is wrong.' })!, /no longer matches.*"SKU" is wrong/);
+  assert.match(connectionProblem({ problem: "notion_not_configured", schemaError: null })!, /^Core's Notion connection is not set up.*Settings > Integrations > Notion/);
+  assert.match(connectionProblem({ problem: "notion_unreadable", schemaError: null })!, /can't be read.*after a restore.*Settings > Integrations > Notion/);
+  assert.match(connectionProblem({ problem: "notion_disabled", schemaError: null })!, /turned off.*Turn it on in Settings > Integrations > Notion/);
+  assert.match(connectionProblem({ problem: "orders_unbound", schemaError: null })!, /no ordering database chosen in Core.*Choose the ordering database below/);
+  assert.match(connectionProblem({ problem: "not_verified", schemaError: null })!, /has not been checked.*Verify the connection/);
+  for (const problem of ["notion_not_configured", "notion_unreadable", "notion_disabled", "orders_unbound", "not_verified"]) assert.match(connectionProblem({ problem, schemaError: null })!, /requests have stopped/, problem);
 });
 
 test("the Connection tab's problem line names a rejected token and lost access, when it happened, and the fix", () => {
-  const rejected = connectionProblem({ tokenSaved: true, problem: "notion_token_rejected", schemaError: null, rejectedMs: at }, zone)!;
-  assert.match(rejected, /^Notion rejected the saved token on Nov 8, 2:14 PM, so new requests and Carts refreshes will fail until this is fixed\. Paired devices stay paired and the log stays\. To fix it, copy a new token/);
-  const lost = connectionProblem({ tokenSaved: true, problem: "notion_access_lost", schemaError: null, rejectedMs: at }, zone)!;
-  assert.match(lost, /^Notion refused access to the ordering database on Nov 8, 2:14 PM, so new requests and Carts refreshes will fail until this is fixed\..*add the connection to the database in Notion.*verify the connection again\.$/);
-  assert.match(connectionProblem({ tokenSaved: true, problem: "notion_token_rejected", schemaError: null })!, /^Notion rejected the saved token, so/);
+  const rejected = connectionProblem({ problem: "notion_token_rejected", schemaError: null, rejectedMs: at }, zone)!;
+  assert.match(rejected, /^Notion rejected the token saved in Core on Nov 8, 2:14 PM, so new requests and Carts refreshes will fail until this is fixed\. Paired devices stay paired and the log stays\. To fix it, copy a new token.*save it in Settings > Integrations > Notion\.$/);
+  const lost = connectionProblem({ problem: "notion_access_lost", schemaError: null, rejectedMs: at }, zone)!;
+  assert.match(lost, /^Notion refused access to the ordering database on Nov 8, 2:14 PM, so new requests and Carts refreshes will fail until this is fixed\..*share the ordering database with the Core connection in Notion.*verify the connection again\.$/);
+  assert.match(connectionProblem({ problem: "notion_token_rejected", schemaError: null })!, /^Notion rejected the token saved in Core, so/);
   for (const text of [rejected, lost]) assert.doesNotMatch(text, /have stopped/, "a refusal does not block requests, and Carts can serve its copy");
 });
 
 test("the Connection tab names a missing Insert content capability, where to turn it on, and that it needs attention", () => {
-  const status = { tokenSaved: true, problem: "notion_insert_refused", schemaError: null, rejectedMs: at };
+  const status = { problem: "notion_insert_refused", schemaError: null, rejectedMs: at };
   assert.equal(isConnected(status), false);
-  assert.equal(connectionProblem(status, zone), "Notion refused to add a request to the ordering database on Nov 8, 2:14 PM because the connection lacks the Insert content capability, so new requests will fail until it is turned on. Carts and the recipient list still work, since they only read. To fix it, open this connection in Notion's integration settings and turn on Insert content under its capabilities. This clears once a request goes through.");
+  assert.equal(connectionProblem(status, zone), "Notion refused to add a request to the ordering database on Nov 8, 2:14 PM because Core's Notion connection lacks the Insert content capability, so new requests will fail until it is turned on. Carts and the recipient list still work, since they only read. To fix it, open the connection in Notion's integration settings and turn on Insert content under its capabilities. This clears once a request goes through.");
+});
+
+test("the Connection card: Core's state in a few words, the capabilities this version needs, and when to offer the previous database", () => {
+  const core = { saved: true, enabled: true, readable: true, connected: true, pausedUntilMs: null, capabilities: {} };
+  assert.equal(coreState(core), "Connected");
+  assert.equal(coreState({ ...core, saved: false, connected: false }), "Not set up");
+  assert.equal(coreState({ ...core, readable: false, connected: false }), "Saved, but can't be read");
+  assert.equal(coreState({ ...core, enabled: false, connected: false }), "Turned off");
+  assert.deepEqual(neededCapabilities.map(([, label]) => label), ["Read content", "Insert content", "Read user information without email addresses"]);
+  const previous = { databaseId: "11111111-2222-4333-8444-555555555555", dataSourceId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", core };
+  assert.equal(offerPrevious({ ...previous, binding: null }), true);
+  assert.equal(offerPrevious({ ...previous, binding: { databaseId: previous.databaseId, dataSourceId: "AAAAAAAABBBB4CCC8DDDEEEEEEEEEEEE", name: "Ordering" } }), false, "the same data source, however it is written");
+  assert.equal(offerPrevious({ ...previous, binding: { databaseId: previous.databaseId, dataSourceId: "bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee", name: "Archive" } }), true);
+  assert.equal(offerPrevious({ ...previous, binding: null, core: { ...core, connected: false } }), false, "Core must be able to check it");
+  assert.equal(offerPrevious({ ...previous, databaseId: null, binding: null }), false);
 });
 
 test("the Connection tab's pairing and recipient notices", () => {
@@ -145,7 +164,7 @@ test("the Connection tab's pairing and recipient notices", () => {
   assert.equal(refreshNotice({ step: "idle", finishedMs: at, lastError: null }), undefined);
   assert.match(refreshNotice({ step: "idle", finishedMs: at, lastError: "notion_500" }, zone)!, /could not finish.*The list from Nov 8, 2:14 PM is still in use/);
   assert.doesNotMatch(refreshNotice({ step: "idle", finishedMs: null, lastError: "notion_500" }, zone)!, /still in use/);
-  assert.equal(refreshNotice({ step: "idle", finishedMs: at, lastError: "notion_users_403" }, zone), "Workspace members could not be listed, so only people named on existing requests are being added. Check that the connection has the Read user information capability.");
+  assert.equal(refreshNotice({ step: "idle", finishedMs: at, lastError: "notion_users_403" }, zone), "Workspace members could not be listed, so only people named on existing requests are being added. Check that Core's Notion connection has the Read user information capability.");
 });
 
 test("Generate pairing PIN: the words on the dialog", async () => {

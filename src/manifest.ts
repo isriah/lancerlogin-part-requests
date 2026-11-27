@@ -7,11 +7,19 @@ const manifest = {
   available: true,
   dependencies: [],
   // Core answers 500 on /admin/<module> routes unless a capability is marked for Operators. Every handler still requires an Admin.
+  // Notion through Core's one connection (SDK 1.8.0). Core refuses anything not declared here. `retrieve` reads the layout,
+  // `query` reads open orders and the people named on requests, and `pages.create` adds a request. Users are listed and read
+  // one at a time for the recipient list; their email addresses are not needed, so `email` is not declared.
+  notion: {
+    users: ["list", "retrieve"],
+    bindings: [{ id: "orders", label: "Ordering database", reason: "Part requests from the browser extension are added here, and Carts and the recipient list read it.", required: true, kind: "data_source", operations: ["retrieve", "query", "pages.create"] }],
+  },
   capabilities: [{ id: "part-requests.admin", label: "Part Requests administration (Admins only)", operator: true }],
   navigation: [],
   // Admin only: Core shows a module settings page to Operators only when its dashboard page is marked for them, and this one is not.
   settings: [{ label: "Part Requests", path: "/settings/part-requests" }],
-  // Public routes and the Discord command stay down until the Notion connection is verified and this step is recorded.
+  // Public routes and the Discord command stay down until the ordering database's layout is verified through Core's Notion
+  // connection and this step is recorded.
   // Leave the version at 1: Core does not update an installed module's setup version, so raising it would lock setup.
   setup: { version: 1, steps: [{ id: "notion-connection", label: "Verified Notion connection", required: true }] },
   jobs: [{ id: "part-requests.recipients", interval: 21_600_000, label: "Part Requests recipient refresh" }],
@@ -32,8 +40,9 @@ const manifest = {
     sharedFields: [],
     transientAuthority: [],
   },
-  // Only the site address travels in a backup. After a restore every device pairs again and an Admin re-enters the Notion
-  // token, and the request log, recipients and each member's chosen person start empty. The orders copy and cart marks don't
+  // Only the site address travels in a backup; Core's Notion connection and the `orders` binding travel in Core's part of an
+  // entire-installation backup. After a restore every device pairs again and an Admin verifies the connection again, and the
+  // request log, recipients and each member's chosen person start empty. The orders copy and cart marks don't
   // travel either: the copy is rebuilt from Notion in a minute, and a mark names a device that has to pair again and expires anyway.
   // carts_enabled is deliberately not among the settings columns in api.ts, so the Carts switch returns to on after a restore.
   backup: {
@@ -55,7 +64,7 @@ const manifest = {
       "part_requests_cart_marks", "part_requests_orders_cache", "part_requests_orders_state",
     ],
   },
-  deletedData: ["Part Requests settings, pairing PINs and paired devices, the Notion token and connection, the request log, recipients, each member's chosen person, the copy of open orders and cart marks"],
+  deletedData: ["Part Requests settings, pairing PINs and paired devices, the checked layout of the ordering database (and a Notion token saved by version 1.1 that was never moved to Core), the request log, recipients, each member's chosen person, the copy of open orders and cart marks"],
 } as const;
 
 export default manifest;

@@ -7,9 +7,9 @@
 //
 // This is the one GET route that writes and calls Notion. It can run during Core's maintenance, which only stops other methods.
 // Its writes are the rate limit and this copy, neither of which travels in a backup, and a failed write serves the old copy.
-import { connectionProblem, parseSchema, readCartsEnabled, readConnection, savedToken, clearRefusal, recordRefusal, type ConnectionRow } from "./connection.ts";
+import { connectionProblem, connectionState, parseSchema, readCartsEnabled, readConnection, clearRefusal, recordRefusal, type ConnectionRow } from "./connection.ts";
 import { json, object, refuse } from "./http.ts";
-import { AppError, decodedId, NotionClient, validPageUrl, type Choice, type PropertyMapping, type Schema } from "./notion.ts";
+import { AppError, decodedId, OrdersNotion, validPageUrl, type Choice, type PropertyMapping, type Schema } from "./notion.ts";
 import { deviceKeyHash, deviceRefusedMessage, installationId, readDevice, type AuthenticatedDevice, type Database } from "./pairing.ts";
 import { consumeGeneral, countStatement, maximumGeneral, rateLimited, type Count, type DeviceRequest } from "./requests.ts";
 import { vendorForUrl } from "./vendors.ts";
@@ -188,7 +188,7 @@ const backoffSeconds = (error: unknown) => {
 };
 
 /** One step of a refresh: claim it, read one Notion page, and save it. */
-async function refreshSlice(db: Database, state: OrdersState | null, device: AuthenticatedDevice, connection: ConnectionRow, client: NotionClient, schema: Schema, open: readonly OpenStatus[], now: number): Promise<Slice> {
+async function refreshSlice(db: Database, state: OrdersState | null, device: AuthenticatedDevice, connection: ConnectionRow, client: OrdersNotion, schema: Schema, open: readonly OpenStatus[], now: number): Promise<Slice> {
   try {
     // The count and the claim commit together. An over-limit device or a held lease claims nothing, and neither does a request
     // that read the state before another request moved it on, which would read the same page again.
@@ -279,14 +279,15 @@ async function ordersAnswer(db: Database, device: AuthenticatedDevice, snapshot:
 const stillReading = () => json({ state: "refreshing", orders: [], refreshing: true, retryAfterSeconds: pollSeconds }, 202, pollSeconds);
 
 /** GET /public/part-requests/orders. `?refresh=1` is the Refresh button. See the README for each answer. */
-export async function readOrders({ db, authorization, credentials, now }: DeviceRequest, refreshAsked: boolean): Promise<Response> {
+export async function readOrders({ db, authorization, services, now }: DeviceRequest, refreshAsked: boolean): Promise<Response> {
   const keyHash = await deviceKeyHash(authorization);
   if (!keyHash) return pairAgain();
   // One D1 round trip: these all start in the same tick.
-  const [device, connection, enabled, state] = await Promise.all([readDevice(db, keyHash), readConnection(db), readCartsEnabled(db), readState(db)]);
+  const [device, saved, enabled, state] = await Promise.all([readDevice(db, keyHash), readConnection(db), readCartsEnabled(db), readState(db)]);
   if (!device) return pairAgain();
   if (!enabled) return cartsDisabled();
-  const problem = connectionProblem(connection);
+  const { row: connection, core } = await connectionState(db, services, saved, now);
+  const problem = connectionProblem(connection, core);
   const schema = parseSchema(connection);
   if (problem || !schema) return refuse(503, problem?.code ?? "notion_not_connected", problem?.error ?? "Part Requests is not connected to Notion. Ask an Admin to finish its setup.");
 
@@ -306,13 +307,7 @@ export async function readOrders({ db, authorization, credentials, now }: Device
     return snapshot ? ordersAnswer(db, device, snapshot, open, now, { refreshing: true }) : stillReading();
   }
 
-  let token: string;
-  try { token = await savedToken(connection, credentials); }
-  catch (error) {
-    if (!(error instanceof AppError)) throw error;
-    return refuse(503, error.code, error.message);
-  }
-  const slice = await refreshSlice(db, state, device, connection as ConnectionRow, new NotionClient(token), schema, open, now);
+  const slice = await refreshSlice(db, state, device, connection as ConnectionRow, new OrdersNotion(services.notion), schema, open, now);
   if (slice.kind === "published") return ordersAnswer(db, device, slice.snapshot, open, now);
   if (slice.kind === "more" || slice.kind === "busy") return snapshot ? ordersAnswer(db, device, snapshot, open, now, { refreshing: true }) : stillReading();
   if (slice.kind === "limited") return snapshot ? ordersAnswer(db, device, snapshot, open, now, { refreshError: "rate_limited" }) : rateLimited(slice.count, now);

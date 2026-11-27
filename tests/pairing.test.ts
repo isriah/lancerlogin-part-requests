@@ -23,7 +23,7 @@ function setup(): { db: TestDatabase; d1: Database } {
   db.run("INSERT INTO members(id,installation_id,external_id,first_name,last_name,email,discord_user_id) VALUES ('m-b','primary','9002','Test Student','B','student.b@example.test',?)", discordB);
   db.run("INSERT INTO members(id,installation_id,external_id,first_name,last_name,email,discord_user_id) VALUES ('m-c','primary','9003','Test Student','C','student.c@example.test',NULL)");
   db.run("INSERT INTO part_requests_settings(installation_id,site_address,updated_ms) VALUES ('primary','https://site.example.test',?)", start);
-  db.run("INSERT INTO part_requests_notion(installation_id,ciphertext,iv,address_salt,schema_json,verified_ms,updated_ms) VALUES ('primary','c','i',?,'{}',?,?)", "0".repeat(64), start, start);
+  db.run("INSERT INTO part_requests_notion(installation_id,address_salt,data_source_id,schema_json,verified_ms,updated_ms) VALUES ('primary',?,'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee','{}',?,?)", "0".repeat(64), start, start);
   return { db, d1: db as unknown as Database };
 }
 const command = (d1: Database, discordId: string | undefined, now = start, viaUser = false) =>

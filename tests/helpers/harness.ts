@@ -1,6 +1,7 @@
 // Calls the plugin's routes the way Core does. The database reproduces Core's scoped database as far as cost goes: reads
 // started in one tick share one batch, and every batch or lone statement counts as one D1 query.
 import { createTestDatabase, type TestDatabase } from "./d1.ts";
+import { createCoreNotion, type Cost } from "./core-notion-stub.ts";
 import { dataSourceId, databaseId, memberPerson, testToken } from "./notion-stub.ts";
 import type { Credentials } from "../../src/connection.ts";
 import { exchangePin, issuePin, type Database, type Statement } from "../../src/pairing.ts";
@@ -77,6 +78,16 @@ export function createHarness(api: any, options: { readonly credentials?: Creden
   test.run("INSERT INTO members(id,installation_id,external_id,first_name,last_name,email,discord_user_id) VALUES ('m-b','primary','9002','Test Student','B','student.b@example.test',?)", discordB);
   const { db, state } = coreDatabase(test);
   const credentials = options.credentials ?? testCredentials();
+  const core = createCoreNotion(credentials);
+  /** What Core's `services.notion` spent, summed over every invocation, and for the last one alone. */
+  const coreCost: Cost & { last: Cost } = { d1: 0, external: 0, notion: 0, last: { d1: 0, external: 0, notion: 0 } };
+  /** `services` for one invocation, as Core builds them per request and per job run. */
+  function services() {
+    const last: Cost = { d1: 0, external: 0, notion: 0 };
+    coreCost.last = last;
+    const cost = new Proxy(last, { set(target, key: "d1" | "external" | "notion", value: number) { coreCost[key] += value - target[key]; target[key] = value; return true; } });
+    return { credentials, notion: core.service(cost) };
+  }
 
   async function call(method: string, path: string, init: { body?: unknown; key?: string; role?: "admin" | "operator" | null; origin?: string; headers?: Record<string, string> } = {}) {
     const url = new URL(`https://worker.example.test${path}`);
@@ -84,7 +95,7 @@ export function createHarness(api: any, options: { readonly credentials?: Creden
     const request = new Request(url, { method, headers: { ...(init.key ? { authorization: `Bearer ${init.key}` } : {}), ...(init.origin ? { origin: init.origin } : {}), ...init.headers } });
     const role = init.role === undefined ? "admin" : init.role;
     const context = {
-      request, url, db, services: { credentials }, dashboardOrigin: dashboard,
+      request, url, db, services: services(), dashboardOrigin: dashboard,
       respond: (body: unknown, status = 200) => Response.json(body, { status }),
       json: async () => init.body,
       body: async () => init.body,
@@ -105,12 +116,12 @@ export function createHarness(api: any, options: { readonly credentials?: Creden
 
   const admin = (method: string, path: string, body?: unknown) => call(method, `/module-setup/part-requests${path}`, { body, origin: dashboard });
 
-  /** Runs the real setup routes against the Notion stub. */
+  /** Core's connection with the `orders` binding, as an Admin leaves them in Settings > Integrations > Notion, then the real verify route. */
   async function connect() {
-    const token = await admin("PUT", "/token", { token: testToken });
-    if (token.status !== 200) throw new Error(`token ${token.text}`);
-    const connection = await admin("POST", "/connection", { databaseUrl: `https://app.notion.com/p/${databaseId.replaceAll("-", "")}?v=99999999999999999999999999999999`, dataSourceId });
-    if (connection.status !== 200) throw new Error(`connection ${connection.text}`);
+    await core.connect();
+    core.bind({ databaseId, dataSourceId, name: "Ordering" });
+    const connection = await admin("POST", "/verify", {});
+    if (connection.status !== 200) throw new Error(`verify ${connection.text}`);
     // The person goodDraft names, as the refresh job would have found them.
     test.run("INSERT OR IGNORE INTO part_requests_recipients(installation_id,notion_user_id,name,last_seen_ms) VALUES ('primary',?,'Test Member',?)", memberPerson, Date.now());
   }
@@ -129,14 +140,25 @@ export function createHarness(api: any, options: { readonly credentials?: Creden
   async function runJob(steps = true, limit = 60) {
     const outcomes: any[] = [];
     for (let run = 0; run < limit; run++) {
-      const outcome = await api.jobs["part-requests.recipients"]({ db, services: { credentials }, scheduler: { steps } });
+      const outcome = await api.jobs["part-requests.recipients"]({ db, services: services(), scheduler: { steps } });
       outcomes.push(outcome);
       if (!outcome?.more) break;
     }
     return outcomes;
   }
 
-  return { test, db, state, credentials, call, admin, connect, pair, runJob };
+  /**
+   * The installation as Part Requests 1.1 left it: connected and verified with its own saved token, and nothing in Core.
+   * `token` is what the 1.1 copy holds.
+   */
+  async function asVersion11(token = testToken) {
+    await connect();
+    const encrypted = await credentials.encrypt({ token });
+    test.run("UPDATE part_requests_notion SET ciphertext=?,iv=? WHERE installation_id='primary'", encrypted.ciphertext, encrypted.iv);
+    core.state.connection = null; core.state.bindings.clear(); core.state.capabilities = {};
+  }
+
+  return { test, db, state, credentials, core, coreCost, services, call, admin, connect, asVersion11, pair, runJob };
 }
 
 export const goodDraft = (overrides: Record<string, unknown> = {}) => ({

@@ -1,11 +1,14 @@
 # LancerLogin Part Requests plugin
 
-Students click a browser extension on a vendor's product page, review the details and create a request in the team's Notion ordering database. LancerLogin holds the Notion token. Students never sign in to LancerLogin.
+Students click a browser extension on a vendor's product page, review the details and create a request in the team's Notion ordering database. LancerLogin Core holds the Notion token, in its shared Notion connection. Students never sign in to LancerLogin.
 
-**Status: v1.1.0, stable.** The backend and the Admin pages are built: pairing, the Notion connection, the device API, the request log, the recipient job, Core's setup screen and **Settings > Modules > Part Requests**. Carts here means reading open orders and recording who built a cart. Filling store carts belongs to the extension.
+**Needs Core's Notion connection: LancerLogin Core 2.1.0-beta.12 / module SDK 1.8.0 or later.** From 1.2.0 the plugin keeps no Notion token of its own. Core saves it in **Settings > Integrations > Notion** and sends every Notion request; the plugin names its `orders` binding, the ordering database an Admin chooses for it. An installation coming from 1.1 needs nothing done: see [Moving from 1.1](#moving-from-11).
+
+**Status: v1.2.0.** The backend and the Admin pages are built: pairing, the Notion connection, the device API, the request log, the recipient job, Core's setup screen and **Settings > Modules > Part Requests**. Carts here means reading open orders and recording who built a cart. Filling store carts belongs to the extension.
 
 | Plugin | LancerLogin Core | Module SDK | Module contract |
 | --- | --- | --- | --- |
+| 1.2.x | `>=2.1.0-beta.12 <3.0.0` | `^1.8.0` | 1 |
 | 1.1.x | `>=2.1.0-beta.7 <3.0.0` | `^1.6.0` | 1 |
 | 1.0.x | `>=2.1.0-beta.7 <3.0.0` | `^1.6.0` | 1 |
 | 0.1.x | `>=2.1.0-beta.7 <3.0.0` | `^1.6.0` | 1 |
@@ -14,15 +17,29 @@ Students click a browser extension on a vendor's product page, review the detail
 
 **Settings > Modules > Part Requests**, Admin only, has three sections:
 
-- **Connection:** any problem and its fix at the top, then the Notion connection and its token, with Replace and Remove, the data source, last verified time, site address and Open setup, which reopens Core's setup screen; the repair fields whenever requests have stopped, as Core does not reopen setup by itself after a token is removed; the recipient list with Refresh now; pairing, with a notice while it is paused; and the Carts switch. One Verify button saves the token and checks the database together. Old `?section=setup` and `?section=status` links open this section.
+- **Connection:** any problem and its fix at the top, then Core's Notion connection (with a link to **Settings > Integrations > Notion**, where the token is saved), the ordering database, last verified time, site address and Open setup, which reopens Core's setup screen; Core's own database picker for the `orders` binding, with **Use the previous ordering database** while Core has none chosen or a different one; **Verify connection**, which checks the chosen database's layout; the recipient list with Refresh now; pairing, with a notice while it is paused; and the Carts switch. Old `?section=setup` and `?section=status` links open this section.
 - **Requests log:** every request with its member and device, newest first, with a banner when any result is uncertain.
 - **Paired devices:** counts, search by name or device, and filters for No devices, At the limit, Inactive 30+ days and Off roster, then one compact row per member by name, including members with no devices. A row opens to that member's devices, with Revoke. **Generate pairing PIN** makes a PIN for a chosen member, for example one without Discord: the same PIN `/ordering-pin` makes, shown once with its expiry, the site address and a Copy button, and removed from the screen when it expires or the dialog closes. Inactive is a prompt to look, not a reason to revoke: last used only changes when a device sends a request or marks a cart item.
 
-Core shows its own setup screen by itself until setup is complete, and an Admin can reopen it from Connection. When Notion answers 401, 403 or 404 to a request or an orders read, or the refresh job gets a 403 or 404 reading the database or a 401 from any call, the code and time are recorded and Connection shows the rejected token or lost access at the top instead of Connected. A 500 or a 429 records nothing. It clears on a successful verify, a new or removed token, or the next call that reaches the database, so a brief glitch doesn't stick. Listing users is not such a call. It doesn't stop requests or change what students are told: each call still tries Notion and reports its own result, and Carts can serve its copy for a while.
+Core shows its own setup screen by itself until setup is complete, and an Admin can reopen it from Connection. When Notion answers 401, 403 or 404 to a request or an orders read, or the refresh job gets a 403 or 404 reading the database or a 401 from any call, the code and time are recorded and Connection shows the rejected token or lost access at the top instead of Connected. A 500, a 429 and Core's own refusals record nothing. It clears on a successful verify or the next call that reaches the database, so a brief glitch doesn't stick. Listing users is not such a call. It doesn't stop requests or change what students are told: each call still tries Notion and reports its own result, and Carts can serve its copy for a while.
 
-A 403 listing workspace members means the connection lacks Read user information. That is not lost access: the refresh carries on with the people named on existing requests, and the recipient card says what to check.
+A 403 listing workspace members means Core's connection lacks Read user information. That is not lost access: the refresh carries on with the people named on existing requests, and the recipient card says what to check.
 
-Core keeps a module open once its setup is complete, so replacing or removing the token later stops requests without closing these pages.
+Core keeps a module open once its setup is complete, so a problem with Core's connection later stops requests without closing these pages.
+
+## Notion capabilities
+
+Core's Notion connection needs these of Notion's five capabilities for this version: **Read content**, **Insert content** and **Read user information** (without email addresses). It does not use Update content or Insert comments, and it never receives email addresses; later versions (stale-request reminders) will also need Update content and Insert comments. The manifest declares exactly what it calls, and Core refuses anything else: the `orders` binding with `retrieve`, `query` and `pages.create`, and users `list` and `retrieve`.
+
+## Moving from 1.1
+
+Version 1.1 saved the Notion token itself. The first request, Carts read, options read, setup page load or job run in 1.2 that finds that copy hands it to Core with `services.notion.importLegacyConnection` and clears the plugin's copy, whatever Core answers:
+
+- **`imported`**: Core had no connection, so it now holds this token, after checking it with Notion. Core also chooses the ordering database for `orders` when Notion confirms the data source belongs to it, so requests carry on with nothing for an Admin to do.
+- **`kept-existing`**: Core already had a connection, which wins. If no database is chosen for `orders` yet, requests stop with `503 notion_not_connected` until an Admin chooses one on the Connection tab; **Use the previous ordering database** asks Core to choose the one 1.1 used, and Core checks its own token can read it first. If it can't, share the ordering database with the Core connection in Notion and try again.
+- **`unreadable`**: the copy can't be decrypted, or Notion refuses it. An Admin saves the token in **Settings > Integrations > Notion**.
+
+The copy stays only while credential encryption is unavailable (Core could not read any token then) or when the call failed without an answer; the next request tries again. Each move writes `part_requests.token_moved_to_core` to the audit log, with the outcome and no actor, and Core writes its own entry. The `ciphertext` and `iv` columns stay in `part_requests_notion`, empty, so 1.2 needs no migration; going back to 1.1 means saving the token there again.
 
 ## Setup (Admin)
 
@@ -30,19 +47,15 @@ Core refuses `/admin/<module>` until a module's setup is complete, so setup uses
 
 | Route | Body | Result |
 | --- | --- | --- |
-| `GET /status` | | What is saved and what is missing. Says whether a token is saved, never the token. Also `problem`, which adds `notion_token_rejected` and `notion_access_lost` with `rejectedMs` when Notion has refused the saved token, and `notion_insert_refused` when it refused to create a page with a 403, which is a connection without the Insert content capability (only a page that is created clears that one, since reading and verifying cannot prove inserting works; replacing the token also clears it), `dataSourceName`, `pairingPausedUntilMs` (the shared pause, `null` when pairing is open), `pairedDevices`, `deviceLimit` and `cartsEnabled`. |
-| `POST /verify` | `{ token?, databaseUrl, dataSourceId? }` | What the setup page's Verify button calls. Checks the token and the database, then saves both together, so a failed check saves nothing. The exception is `409 data_source_required` during first-time setup, which lists the choices and keeps the token, because it has already proved itself. With a token already saved, nothing is saved. Leave out `token` to use the saved one. Replace token uses this route with the saved `dataSourceId`, so it saves and verifies in one step, and a failure leaves the old token in place. Refusals are the same as `PUT /token` and `POST /connection`. |
-| `PUT /token` | `{ token }` | Checks the token with Notion, encrypts and saves it, and saves the dashboard address as the site address. A token saved this way must be verified with `POST /connection`. The page uses it only when no database is saved yet. |
-| `DELETE /token` | | Removes the token. Requests stop. |
-| `POST /database` | `{ databaseUrl }` | `{ databaseId, dataSources }`. Accepts `notion.so`, `notion.com` and `notion.site` links, or a bare ID. |
-| `POST /connection` | `{ databaseUrl, dataSourceId? }` | Validates the layout and saves it. `409 data_source_required` lists the choices, and `422 schema_mismatch` says which property is wrong. |
+| `GET /status` | | What is set up and what is missing, never a token. `core` is Core's connection as `services.notion.status()` reports it (`saved`, `enabled`, `readable`, `connected`, `pausedUntilMs`, `capabilities`); `binding` is the database Core has chosen for `orders` (`databaseId`, `dataSourceId`, `name`) or `null`; `databaseId`, `dataSourceId`, `dataSourceName` and `verifiedMs` are the database this plugin last verified; `legacyTokenSaved` is true only while a 1.1 token is waiting to move to Core. `problem` is, in the order to fix them: `notion_not_configured`, `notion_unreadable`, `notion_disabled` (Core's connection), `orders_unbound` (no database chosen), `not_verified` (the chosen database's layout has not been checked, for example after choosing another one), `notion_schema_changed`; then, without stopping requests, `notion_token_rejected` and `notion_access_lost` with `rejectedMs`, and `notion_insert_refused` after a 403 creating a page, which is a connection without Insert content (only a page that is created clears that one, or verifying a different database). Also `pairingPausedUntilMs` (the shared pause, `null` when pairing is open), `pairedDevices`, `deviceLimit` and `cartsEnabled`. |
+| `POST /verify` | `{}` | What the Verify button calls. Reads the layout of the database Core has bound for `orders`, through Core, checks it and saves it with the dashboard address as the site address. A failed check saves nothing. Refusals: `409` with `notion_not_configured`, `notion_unreadable`, `notion_disabled` or `notion_unbound`; `422 schema_mismatch` (says which property is wrong), `notion_token_rejected`, `notion_403` or `notion_404`; `503 notion_rate_limited`; `502 notion_unavailable`. The token and the database are chosen in Core: in **Settings > Integrations > Notion**, or with Core's picker on this page (`PUT /admin/integrations/notion/bindings/part-requests/orders`). |
 | `PUT /carts` | `{ enabled }` | Turns Carts on or off for the installation and returns the same as `GET /status`. It is on by default. Turning it off also deletes the copy of the open orders. |
 
 Then record the step with Core: `PUT /admin/modules/part-requests/setup` with `{ generation, stepId: "notion-connection", outcome: "completed" }`. Core opens the module once the connection is verified.
 
-The expected database layout: Item Description (title), Status (status or select, with `NORMAL Request` and `Incomplete Request`), Vendor (select, with all 20 store names), Team (select or multi-select), Orderer/Recipient (people), SKU (rich text), Product URL (url), Qty (number), Unit Price (number) and Extension (formula or rollup, never written). The connection must be added to that database, with these capabilities: Read content, Insert content, and Read user information without email addresses.
+The expected database layout: Item Description (title), Status (status or select, with `NORMAL Request` and `Incomplete Request`), Vendor (select, with all 20 store names), Team (select or multi-select), Orderer/Recipient (people), SKU (rich text), Product URL (url), Qty (number), Unit Price (number) and Extension (formula or rollup, never written). Core's Notion connection must be added to that database, with the capabilities above.
 
-After a restore, only the site address comes back. Core still shows the module as set up, but requests answer `503 notion_not_connected` until an Admin saves the token and connection again. Every device pairs again, and the log, the recipient list and each member's chosen person start empty. So do the copy of the open orders and the cart marks, and the Carts switch returns to on.
+After a restore, the site address comes back with this plugin's data, and Core's Notion connection and `orders` binding come back with Core's part of an entire-installation backup (an installation whose key can't read the token shows it as saved but unreadable until an Admin saves it again). Core still shows the module as set up, but requests answer `503 notion_not_connected` until an Admin verifies the connection again. Every device pairs again, and the log, the recipient list and each member's chosen person start empty. So do the copy of the open orders and the cart marks, and the Carts switch returns to on.
 
 ## Device API
 
@@ -93,12 +106,13 @@ The extension creates `submissionId` (a lowercase UUID) when a request starts an
 | `200` | `state: "created", pageUrl, replayed: true` | Done. This ID had already succeeded. |
 | `202` | `state: "pending"` | Another request with this ID is still running. Ask again shortly. |
 | `202` | `state: "uncertain"` | **Do not retry on its own.** Notion may have created the page. Ask the student to check, and use a new ID only if they choose to make a new request. |
-| `502` | `state: "failed", code, error` | Notion refused it, so nothing was created. Repeats of this ID return the same answer; trying again needs a new ID. |
+| `502` | `state: "failed", code, error` | Notion refused it, or Core refused it before sending (`notion_not_sent`, or a code such as `notion_429` while Core holds calls after a rate limit), so nothing was created. Repeats of this ID return the same answer; trying again needs a new ID. |
 | `400` | `code: "validation", errors` | Nothing was recorded. Fix it and resend. |
 | `401` | `code: "pair_again"` | Prompt to pair again. |
 | `409` | `code: "submission_conflict"` | The ID was used for different content or by another member. Start a new request. |
 | `429` | `code: "rate_limited", retryAfterSeconds` | Nothing was recorded. Retry the same ID after the wait. |
-| `503` | `code: "notion_not_connected"`, `"notion_schema_changed"`, `"credentials_unavailable"` or `"credentials_unreadable"` | An Admin has to act. Nothing was recorded. |
+| `503` | `code: "notion_not_connected"` or `"notion_schema_changed"` | An Admin has to act. Nothing was recorded. `notion_not_connected` covers every problem with Core's connection or the ordering database. |
+| `503` | `code: "delivery_paused"`, `Retry-After: 60` | Core is holding every module's Notion writes (an Admin's Stop, or a restore). Nothing was recorded; retry the same ID later. |
 | `503` | `code: "update_maintenance"` | See below. |
 
 Rate limits are per device, in 10-minute windows: 30 creates, and 120 other writes (`/check`, `/recipient`, `/devices/self/revoke`, `/orders/marks` and `/orders/marks/clear`), which also count each `GET /orders` that reads Notion. Other `GET` routes, and a `GET /orders` served from the copy, are not counted, because they make no Notion call and should not write during maintenance. `/pair` allows 20 wrong PINs per client address when one is available, and 200 across the installation, then pauses for 15 minutes with `429 pairing_paused`.
@@ -155,9 +169,9 @@ The answer comes from a copy shared by all devices, kept for 60 seconds, so the 
 | `429` | `code: "rate_limited", retryAfterSeconds` | Wait. Only when there is no copy to serve. |
 | `502` | `code: "notion_unavailable"` | Try again after `Retry-After`. |
 | `503` | `code: "notion_rate_limited"` | Try again after `Retry-After`. |
-| `503` | `code: "notion_access_lost"`, `"notion_not_connected"`, `"notion_schema_changed"`, `"credentials_unavailable"` or `"credentials_unreadable"` | An Admin has to act. |
+| `503` | `code: "notion_access_lost"`, `"notion_not_connected"` or `"notion_schema_changed"` | An Admin has to act. |
 
-After a failed read, Notion is left alone for 30 seconds, or for as long as Notion asked, up to 2 minutes.
+After a failed read, Notion is left alone for 30 seconds, or for as long as Notion asked, up to 2 minutes. After Notion rate limits any module, Core holds every module's calls until the time Notion named; Carts serves its copy meanwhile.
 
 ### Cart marks
 
@@ -183,10 +197,12 @@ Under `/admin/part-requests`, Admin only. Core requires a capability marked for 
 
 ## Recipient refresh
 
-The job `part-requests.recipients` runs every six hours, doing one Notion call per scheduler slice: the database layout, then workspace members, then people named on up to 2,000 existing requests (the only way to find guests), then any missing names. If the layout no longer fits, requests stop with `503 notion_schema_changed` until an Admin reconnects. It also removes expired cart marks, and a copy of the open orders nobody has used for a day. It makes no Notion call for Carts.
+The job `part-requests.recipients` runs every six hours, doing one Notion call per scheduler slice (five per run under Core's cron fallback): the database layout, then workspace members, then people named on up to 2,000 existing requests (the only way to find guests), then any missing names. If the layout no longer fits, requests stop with `503 notion_schema_changed` until an Admin reconnects. It also removes expired cart marks, and a copy of the open orders nobody has used for a day. It makes no Notion call for Carts. It waits, and says so on the recipient card, while Core's connection is not usable or the `orders` binding is not the verified database.
+
+Notion calls go through Core and count against the scheduler's budget like Discord requests: each is one provider request plus one D1 read, and Core reads its connection once per run. Measured against the test stand-in: an ordinary slice uses 6 of a Durable Object slice's 40 subrequests (1 provider request); the slice that moves a 1.1 token uses 15 (3); a cron-fallback run uses 23 of the pass's 46 (5 Notion requests), or 32 (7) on the run that moves a 1.1 token, within Core's 8 Notion requests per invocation. A request or Carts read makes one Notion request, or three when it moves a 1.1 token.
 
 ## Tests
 
-- `npm test` runs the unit tests with no Core checkout. Notion is stubbed at the fetch boundary, so no request leaves the computer.
+- `npm test` runs the unit tests with no Core checkout. `tests/helpers/core-notion-stub.ts` stands in for Core's `services.notion` (bindings, refusals, the 8-request cap, the shared pause after a rate limit, held deliveries and `importLegacyConnection`), and Notion is stubbed at the fetch boundary under it, so no request leaves the computer.
 - `npm run verify:core -- <Core checkout>` composes the committed plugin into Core, then typechecks and builds it.
 - `spikes/mv3-pairing` holds the Phase 0 browser test of a Manifest V3 extension against a local preview. See its README.
