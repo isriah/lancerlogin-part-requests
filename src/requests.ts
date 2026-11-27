@@ -3,9 +3,9 @@
 // Duplicate protection: a submission ID's row is written before Notion is called, and only the request that wrote it calls
 // Notion. Anything else with that ID gets the recorded result. A row still pending after the Notion timeout means the Worker
 // stopped without an answer (the client can disconnect mid-request), so it reads as uncertain and is never sent again.
-import { clearRefusal, connectionProblem, insertRefused, parseSchema, readCartsEnabled, readConnection, recordRefusal, savedToken, type ConnectionRow, type Credentials } from "./connection.ts";
+import { clearRefusal, connectionProblem, connectionState, insertRefused, parseSchema, readCartsEnabled, readConnection, recordRefusal, type ConnectionRow, type NotionServices } from "./connection.ts";
 import { json, object, refuse } from "./http.ts";
-import { AppError, databaseLink, NotionClient, pagePayload, parseDraft, statusIncomplete, statusNormal, validateDraft, type RequestDraft } from "./notion.ts";
+import { AppError, databaseLink, OrdersNotion, pageProperties, parseDraft, statusIncomplete, statusNormal, validateDraft, type RequestDraft } from "./notion.ts";
 import { deviceKeyHash, deviceRefusedMessage, installationId, readDevice, sha256Hex, type AuthenticatedDevice, type Database } from "./pairing.ts";
 import { productSkuKey, productUrlKey, vendorForUrl, vendors } from "./vendors.ts";
 
@@ -23,6 +23,9 @@ export const extensionUpdateUrl = "https://github.com/isriah/lancerlogin-part-re
 
 const submissionIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const uncertainMessage = "Notion may or may not have created this request. Check the database before making a new request.";
+const notSentMessage = "Nothing was sent to Notion. Try again in a few minutes with a new request.";
+export const deliveryPausedMessage = "LancerLogin is holding messages to Notion for now, so nothing was sent. Try again in a few minutes.";
+const deliveryPausedRetrySeconds = 60;
 
 const pairAgain = () => refuse(401, "pair_again", deviceRefusedMessage);
 
@@ -65,13 +68,14 @@ export async function consumeGeneral(db: Database, device: Pick<AuthenticatedDev
   return count && Number(count.requests) > maximumGeneral ? rateLimited(count, now) : undefined;
 }
 
-export type DeviceRequest = { readonly db: Database; readonly authorization: string | null; readonly credentials: Credentials; readonly now: number };
+/** `services` is Core's: its Notion connection, and the credentials check used when moving a 1.1 token into Core. */
+export type DeviceRequest = { readonly db: Database; readonly authorization: string | null; readonly services: NotionServices; readonly now: number };
 
 /** GET /public/part-requests/options: everything the popup offers. Reads only, so it works during Core's maintenance. */
-export async function readOptions({ db, authorization }: DeviceRequest): Promise<Response> {
+export async function readOptions({ db, authorization, services, now }: DeviceRequest): Promise<Response> {
   const keyHash = await deviceKeyHash(authorization);
   if (!keyHash) return pairAgain();
-  const [device, connection, cartsEnabled, people, refresh] = await Promise.all([
+  const [device, saved, cartsEnabled, people, refresh] = await Promise.all([
     readDevice(db, keyHash),
     readConnection(db),
     readCartsEnabled(db),
@@ -79,7 +83,8 @@ export async function readOptions({ db, authorization }: DeviceRequest): Promise
     db.prepare("SELECT finished_ms AS finishedMs FROM part_requests_recipient_refresh WHERE installation_id=?").bind(installationId).first<{ finishedMs: number | null }>(),
   ]);
   if (!device) return pairAgain();
-  const problem = connectionProblem(connection);
+  const { row: connection, core } = await connectionState(db, services, saved, now);
+  const problem = connectionProblem(connection, core);
   if (problem) return refuse(503, problem.code, problem.error);
   const chosen = await db.prepare("SELECT notion_user_id AS id FROM part_requests_member_recipients WHERE installation_id=? AND member_id=?").bind(installationId, device.memberId).first<{ id: string }>();
   const recipients = (people.results ?? []).map((person) => ({ id: person.id, name: person.name || "Unnamed Notion user" }));
@@ -162,7 +167,7 @@ export async function readRequest({ db, authorization, now }: DeviceRequest, id:
 const fingerprintOf = (draft: RequestDraft) => sha256Hex(JSON.stringify([draft.description, draft.status, draft.url, draft.sku, draft.team, draft.recipient, draft.quantity, draft.price, draft.currencyConfirmed]));
 
 /** POST /public/part-requests/requests: { submissionId, draft }. See the README for each response. */
-export async function createRequest({ db, authorization, credentials, now }: DeviceRequest, body: unknown): Promise<Response> {
+export async function createRequest({ db, authorization, services, now }: DeviceRequest, body: unknown): Promise<Response> {
   const keyHash = await deviceKeyHash(authorization);
   if (!keyHash) return pairAgain();
   const input = object(body);
@@ -173,7 +178,7 @@ export async function createRequest({ db, authorization, credentials, now }: Dev
   const fingerprint = draft ? await fingerprintOf(draft) : "";
 
   // One D1 round trip: these all start in the same tick.
-  const [device, connection, existing, recipient, repeats] = await Promise.all([
+  const [device, saved, existing, recipient, repeats] = await Promise.all([
     readDevice(db, keyHash),
     readConnection(db),
     id ? readSubmission(db, id) : null,
@@ -188,21 +193,22 @@ export async function createRequest({ db, authorization, credentials, now }: Dev
     if (existing.memberId !== device.memberId || existing.fingerprint !== fingerprint) return refuse(409, "submission_conflict", "This submission ID was already used for a different request. Start a new request.");
     return recorded(id, existing, now);
   }
-  const problem = connectionProblem(connection);
+  const { row: connection, core } = await connectionState(db, services, saved, now);
+  const problem = connectionProblem(connection, core);
   const schema = parseSchema(connection);
   if (problem || !schema) return refuse(503, problem?.code ?? "notion_not_connected", problem?.error ?? "Part Requests is not connected to Notion. Ask an Admin to finish its setup.");
   const errors = validateDraft(draft, schema, Boolean(recipient));
   if (errors.length) return refuse(400, "validation", errors.join(" "), { errors });
 
-  let payload: Record<string, unknown>;
-  let token: string;
-  try {
-    payload = pagePayload(draft, schema);
-    token = await savedToken(connection, credentials);
-  } catch (error) {
+  let properties: Record<string, unknown>;
+  try { properties = pageProperties(draft, schema); }
+  catch (error) {
     if (!(error instanceof AppError)) throw error;
     return refuse(503, error.code, error.message);
   }
+  // Core holds every module's Notion writes while an Admin's Stop or a restore pauses deliveries. With the connection and
+  // the binding in order, that is the only thing ready() can still be waiting for. Nothing is recorded, so the same ID works later.
+  if (!await services.notion.ready()) return refuse(503, "delivery_paused", deliveryPausedMessage, {}, deliveryPausedRetrySeconds);
 
   // Count the request and record the ID together. The insert also rechecks the device and the roster at this moment.
   const vendor = vendorForUrl(draft.url)!;
@@ -233,14 +239,20 @@ export async function createRequest({ db, authorization, credentials, now }: Dev
   ]).catch(() => undefined); // The pending row stays and later reads as uncertain, so nothing is ever sent twice.
 
   try {
-    const pageUrl = await new NotionClient(token).create(payload);
+    const pageUrl = await new OrdersNotion(services.notion).create(properties);
     await finish("created", pageUrl, null, null);
     await clearRefusal(db, connection as ConnectionRow, true);
     return json({ submissionId: id, state: "created", pageUrl, repeats }, 201);
   } catch (error) {
     if (!(error instanceof AppError)) {
-      await finish("uncertain", null, "unexpected", uncertainMessage);
-      throw error;
+      // Not a Notion answer. Core reports through uncertain() whether Notion may have done the work; for anything else it
+      // threw before sending (deliveries paused since the check above, or a D1 failure inside Core), so nothing was created.
+      if (services.notion.uncertain(error)) {
+        await finish("uncertain", null, "unexpected", uncertainMessage);
+        throw error;
+      }
+      await finish("failed", null, "notion_not_sent", notSentMessage);
+      return json({ submissionId: id, state: "failed", error: notSentMessage, code: "notion_not_sent" }, 502);
     }
     if (error.uncertain) {
       await finish("uncertain", null, error.code, uncertainMessage);

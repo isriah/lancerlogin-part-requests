@@ -3,7 +3,7 @@
   "title": "LancerLogin Part Requests plugin",
   "core": {
     "repository": "isriah/LancerLogin",
-    "tag": "v2.1.0-beta.7",
-    "commit": "d9d1e101ffe34bbf066bea36d9c067311d1f108c"
+    "tag": "v2.1.0-beta.12",
+    "commit": "2f1ef4c945a9d04d981d70c748ea2cfa01497d67"
   }
 }

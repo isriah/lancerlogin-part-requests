@@ -1,9 +1,17 @@
-// The saved Notion connection and the Admin setup routes for it. Modelled on Carpool's Geoapify key: the token goes through
-// services.credentials, only its ciphertext is stored, in a table in nonPortableTables, and it is never returned.
+// The Notion connection as Part Requests sees it, and the Admin setup routes for it.
+//
+// From 1.2.0 the token lives in Core (Settings > Integrations > Notion) and every Notion request goes through
+// `services.notion` with the `orders` binding, which an Admin points at the ordering database. This plugin keeps only what
+// is its own: the ordering database's layout (`schema_json`), when it was last checked, and why Notion last refused a call.
+//
+// Moving from 1.1: a 1.1 installation saved the token itself, as ciphertext in part_requests_notion. The first request or job
+// run that finds it hands it to Core with `importLegacyConnection` and then clears the plugin's copy. The columns stay, empty,
+// so the table needs no migration; going back to 1.1 means saving the token there again.
 //
 // These routes live under /module-setup, not /admin: Core refuses /admin/<module> until setup is complete, and they are how
-// setup completes. Core keeps /module-setup open to Admins afterwards, so the token can be replaced later or after a restore.
-import { AppError, NotionClient, type Choice, type Schema } from "./notion.ts";
+// setup completes. Core keeps /module-setup open to Admins afterwards.
+import type { NotionBinding, NotionService, NotionServiceStatus } from "@lancerlogin/module-sdk/api";
+import { AppError, OrdersNotion, ordersBinding, sameId, type Schema } from "./notion.ts";
 import { object, refuse, json } from "./http.ts";
 import { installationId, maximumDevicesPerMember, type Database, type Statement } from "./pairing.ts";
 
@@ -12,8 +20,12 @@ export type Credentials = {
   encrypt(value: Record<string, string>): Promise<{ ciphertext: string; iv: string }>;
   decrypt(ciphertext: string, iv: string): Promise<Record<string, string>>;
 };
+/** What Core gives a route or job: its Notion connection, and the credentials check that says whether Core can read a token at all. */
+export type NotionServices = { readonly credentials: Credentials; readonly notion: NotionService };
 export type ConnectionRow = {
-  readonly ciphertext: string | null; readonly iv: string | null; readonly databaseId: string | null; readonly dataSourceId: string | null;
+  /** A token saved by Part Requests 1.1, until it has been handed to Core. Never used for a request. */
+  readonly ciphertext: string | null; readonly iv: string | null;
+  readonly databaseId: string | null; readonly dataSourceId: string | null;
   readonly schemaJson: string | null; readonly verifiedMs: number | null; readonly schemaError: string | null;
   readonly rejectionCode: string | null; readonly rejectedMs: number | null;
 };
@@ -35,21 +47,63 @@ export const parseSchema = (row: ConnectionRow | null): Schema | undefined => {
   try { return JSON.parse(row.schemaJson) as Schema; } catch { return undefined; }
 };
 
-/** The token for this request. Errors say what to do and never carry the value. */
-export async function savedToken(row: ConnectionRow | null, credentials: Credentials): Promise<string> {
-  if (!row?.ciphertext || !row.iv) throw new AppError("No Notion token is saved. An Admin needs to finish Part Requests setup.", "notion_not_connected");
-  if (!credentials.available) throw new AppError("Credential encryption is unavailable on this installation.", "credentials_unavailable");
-  try {
-    const token = (await credentials.decrypt(row.ciphertext, row.iv)).token;
-    if (!token) throw new Error("empty");
-    return token;
-  } catch { throw new AppError("The saved Notion token could not be read. An Admin needs to save it again.", "credentials_unreadable"); }
+// ---- Moving a 1.1 token into Core
+
+/**
+ * Hand a token Part Requests 1.1 saved to Core, then clear this plugin's copy. Core fills its connection only when it has
+ * none, and keeps the ordering database only when Notion confirms the data source belongs to it, so a working 1.1
+ * installation carries on without an Admin doing anything.
+ *
+ * Every answer Core gives is final, so the copy is cleared after each of them:
+ * - `imported`: Core now holds the token, and the `orders` binding when Notion confirmed it.
+ * - `kept-existing`: Core already had a connection, and Core never replaces one with this token. An Admin chooses the
+ *   ordering database for Core's connection (the setup page offers the one 1.1 used).
+ * - `unreadable`: neither Core nor this plugin can use the token (it can't be decrypted, or Notion refused it). An Admin
+ *   saves a token in Settings > Integrations > Notion.
+ * The copy stays when encryption is unavailable, since Core could not read any token then, or when the call failed
+ * (Notion or D1 did not answer): nothing changed in Core, and the next request or run tries again.
+ */
+export async function adoptLegacyToken(db: Database, services: NotionServices, row: ConnectionRow | null, now: number): Promise<ConnectionRow | null> {
+  if (!row?.ciphertext || !row.iv || !services.credentials.available) return row;
+  const bindings = row.databaseId && row.dataSourceId ? [{ id: ordersBinding, databaseId: row.databaseId, dataSourceId: row.dataSourceId, name: parseSchema(row)?.dataSourceName ?? "" }] : [];
+  let outcome: string;
+  try { outcome = await services.notion.importLegacyConnection({ ciphertext: row.ciphertext, iv: row.iv, bindings }); }
+  catch { return row; }
+  // `ciphertext` in the WHERE: another request may have moved it already, and then this one writes nothing.
+  await db.batch([
+    db.prepare("UPDATE part_requests_notion SET ciphertext=NULL,iv=NULL,updated_ms=? WHERE installation_id=? AND ciphertext=?").bind(now, installationId, row.ciphertext),
+    db.prepare("INSERT INTO audit_log(id,installation_id,actor_user_id,action,target_type,target_id,metadata_json,created_at) SELECT ?,?,NULL,?,?,?,?,? WHERE changes()=1")
+      .bind(crypto.randomUUID(), installationId, "part_requests.token_moved_to_core", "part_requests_notion", installationId, JSON.stringify({ outcome }), new Date(now).toISOString()),
+  ]).catch(() => undefined); // A copy that could not be cleared is cleared next time; Core ignores a second import.
+  return { ...row, ciphertext: null, iv: null };
 }
 
-/** What stops requests going to Notion, if anything. A saved token alone is not a connection. */
-export function connectionProblem(row: ConnectionRow | null): { readonly code: string; readonly error: string } | undefined {
-  if (!row?.ciphertext || !row.schemaJson || !row.verifiedMs) return { code: "notion_not_connected", error: "Part Requests is not connected to Notion. Ask an Admin to finish its setup." };
-  if (row.schemaError) return { code: "notion_schema_changed", error: "The Notion database no longer matches what Part Requests expects. Ask an Admin to check the connection." };
+// ---- Core's connection and binding
+
+export type CoreState = { readonly status: NotionServiceStatus; readonly binding: NotionBinding | undefined };
+
+/** Core's connection and the `orders` binding: one D1 read by Core, shared by every later Notion call in this request or run. */
+export async function readCore(notion: NotionService): Promise<CoreState> {
+  const [status, binding] = await Promise.all([notion.status(), notion.binding(ordersBinding)]);
+  return { status, binding };
+}
+
+/**
+ * The plugin's row and Core's state for a request or job run, after moving a 1.1 token into Core if one is still saved.
+ * `row` is the row the caller already read alongside its own reads.
+ */
+export async function connectionState(db: Database, services: NotionServices, row: ConnectionRow | null, now: number): Promise<{ readonly row: ConnectionRow | null; readonly core: CoreState }> {
+  const adopted = await adoptLegacyToken(db, services, row, now);
+  return { row: adopted, core: await readCore(services.notion) };
+}
+
+/** The saved layout describes the database Core has bound now. A different binding needs verifying first. */
+const verifiedForBinding = (row: ConnectionRow | null, core: CoreState) => Boolean(row?.schemaJson && row.verifiedMs && core.binding && sameId(row.dataSourceId, core.binding.dataSourceId));
+
+/** What stops requests going to Notion, if anything, in words for students. Only Core's connection and binding count, and the checked layout. */
+export function connectionProblem(row: ConnectionRow | null, core: CoreState): { readonly code: string; readonly error: string } | undefined {
+  if (!core.status.connected || !verifiedForBinding(row, core)) return { code: "notion_not_connected", error: "Part Requests is not connected to Notion. Ask an Admin to finish its setup." };
+  if (row!.schemaError) return { code: "notion_schema_changed", error: "The Notion database no longer matches what Part Requests expects. Ask an Admin to check the connection." };
   return undefined;
 }
 
@@ -59,32 +113,50 @@ export function connectionProblem(row: ConnectionRow | null): { readonly code: s
  */
 export const insertRefused = "notion_insert_403";
 
-/** What the Admin page reports when Notion refused the saved token. It does not stop requests: see the migration. */
-const refusedProblem = (row: ConnectionRow | null) => !row?.rejectionCode ? undefined
-  : row.rejectionCode === "notion_401" ? "notion_token_rejected" : row.rejectionCode === insertRefused ? "notion_insert_refused" : "notion_access_lost";
+/**
+ * Why requests have stopped, or what Notion last refused, for the Admin page. Checked in the order an Admin fixes them:
+ * Core's connection, the ordering database, this plugin's check of its layout, then refusals, which do not stop requests.
+ */
+export function adminProblem(row: ConnectionRow | null, core: CoreState): string | null {
+  const { status } = core;
+  if (!status.saved) return "notion_not_configured";
+  if (!status.readable) return "notion_unreadable";
+  if (!status.enabled) return "notion_disabled";
+  if (!core.binding) return "orders_unbound";
+  if (!verifiedForBinding(row, core)) return "not_verified";
+  if (row!.schemaError) return "notion_schema_changed";
+  if (!row!.rejectionCode) return null;
+  return row!.rejectionCode === "notion_401" ? "notion_token_rejected" : row!.rejectionCode === insertRefused ? "notion_insert_refused" : "notion_access_lost";
+}
 
 /**
- * Remember that Notion refused this token: 401, 403 or 404 for lost access, or `insertRefused`. Other failures, such as a 500
- * or a 429, say nothing about the token. `ciphertext` in the WHERE means a slow call made with a replaced token cannot mark the
- * new one. A failure to write this must not change the answer to whoever made the call.
+ * Remember that Notion refused a call: 401, 403 or 404 for lost access, or `insertRefused`. Other failures, such as a 500 or a
+ * 429, and Core's own refusals say nothing about the database. `data_source_id` in the WHERE means a slow call made before an
+ * Admin verified another database cannot mark the new one. A failure to write this must not change the answer to whoever
+ * made the call.
  */
 export async function recordRefusal(db: Database, row: ConnectionRow, code: string, now: number): Promise<void> {
-  if (code !== "notion_401" && code !== "notion_403" && code !== "notion_404" && code !== insertRefused || row.rejectionCode === code || !row.ciphertext) return;
-  await db.prepare("UPDATE part_requests_notion SET rejection_code=?,rejected_ms=? WHERE installation_id=? AND ciphertext=?").bind(code, now, installationId, row.ciphertext).run().catch(() => undefined);
+  if (code !== "notion_401" && code !== "notion_403" && code !== "notion_404" && code !== insertRefused || row.rejectionCode === code || !row.dataSourceId) return;
+  await db.prepare("UPDATE part_requests_notion SET rejection_code=?,rejected_ms=? WHERE installation_id=? AND data_source_id=?").bind(code, now, installationId, row.dataSourceId).run().catch(() => undefined);
 }
 
 /**
- * A Notion call with this token worked, so whatever refused it before has passed. No write unless a refusal is recorded.
- * A read (`created` false) says nothing about inserting, so it never clears `insertRefused`, even one recorded after `row` was
- * read: the check is in the WHERE. Only a page that was created does.
+ * A Notion call worked, so whatever refused it before has passed. No write unless a refusal is recorded. A read (`created`
+ * false) says nothing about inserting, so it never clears `insertRefused`, even one recorded after `row` was read: the check
+ * is in the WHERE. Only a page that was created does.
  */
 export async function clearRefusal(db: Database, row: ConnectionRow, created = false): Promise<void> {
-  if (!row.rejectionCode || !row.ciphertext || !created && row.rejectionCode === insertRefused) return;
-  await db.prepare(`UPDATE part_requests_notion SET rejection_code=NULL,rejected_ms=NULL WHERE installation_id=? AND ciphertext=?${created ? "" : " AND rejection_code<>?"}`)
-    .bind(installationId, row.ciphertext, ...created ? [] : [insertRefused]).run().catch(() => undefined);
+  if (!row.rejectionCode || !row.dataSourceId || !created && row.rejectionCode === insertRefused) return;
+  await db.prepare(`UPDATE part_requests_notion SET rejection_code=NULL,rejected_ms=NULL WHERE installation_id=? AND data_source_id=?${created ? "" : " AND rejection_code<>?"}`)
+    .bind(installationId, row.dataSourceId, ...created ? [] : [insertRefused]).run().catch(() => undefined);
 }
 
-export const stepSql = "EXISTS(SELECT 1 FROM part_requests_settings WHERE installation_id=?) AND EXISTS(SELECT 1 FROM part_requests_notion WHERE installation_id=? AND ciphertext IS NOT NULL AND schema_json IS NOT NULL AND verified_ms IS NOT NULL)";
+/**
+ * The setup step: the site address is saved and the ordering database's layout has been checked through Core's `orders`
+ * binding. A layout is only ever saved from a read through that binding, by POST /verify. Whether Core's connection and
+ * binding still work is checked on every request instead (connectionProblem), since Core's tables are not this plugin's.
+ */
+export const stepSql = "EXISTS(SELECT 1 FROM part_requests_settings WHERE installation_id=?) AND EXISTS(SELECT 1 FROM part_requests_notion WHERE installation_id=? AND data_source_id IS NOT NULL AND schema_json IS NOT NULL AND verified_ms IS NOT NULL)";
 
 const randomHex = () => [...crypto.getRandomValues(new Uint8Array(32))].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 
@@ -94,7 +166,7 @@ const audit = (db: Database, actor: string, action: string, now: number): Statem
 
 export type AdminRouteContext = {
   readonly request: Request; readonly url: URL; readonly db: unknown; readonly dashboardOrigin: string | undefined;
-  readonly services: { readonly credentials: Credentials };
+  readonly services: NotionServices;
   requireRole(roles: readonly "admin"[]): Promise<{ readonly userId: string }>;
   requireDashboardOrigin(message: string): void;
   json<T = unknown>(maxBytes?: number): Promise<T>;
@@ -107,124 +179,74 @@ export async function requireAdmin(context: AdminRouteContext) {
   return principal;
 }
 
-/** How a Notion failure reads to an Admin. Only fixed messages: nothing from Notion's reply or the token. */
-const notionFailure = (error: unknown) => {
+/** How a Notion failure reads to an Admin verifying. Only fixed messages: nothing from Notion's reply. */
+const verifyFailure = (error: unknown) => {
   if (!(error instanceof AppError)) throw error;
-  const details = object(error.details);
-  if (error.code === "data_source_required") return refuse(409, error.code, error.message, { dataSources: details.dataSources as readonly Choice[] });
-  if (error.code === "validation" || error.code === "schema") return refuse(422, error.code === "schema" ? "schema_mismatch" : "invalid_link", error.message);
+  if (error.code === "schema") return refuse(422, "schema_mismatch", error.message);
   if (error.code === "notion_401") return refuse(422, "notion_token_rejected", error.message);
   if (error.code === "notion_403" || error.code === "notion_404") return refuse(422, error.code, error.message);
-  if (error.code === "notion_not_connected") return refuse(409, error.code, error.message);
-  if (error.code === "credentials_unavailable" || error.code === "credentials_unreadable") return refuse(503, error.code, error.message);
+  if (error.code === "notion_429") return refuse(503, "notion_rate_limited", error.message);
+  if (["notion_not_configured", "notion_disabled", "notion_unreadable", "notion_unbound"].includes(error.code)) return refuse(409, error.code, error.message);
   return refuse(502, "notion_unavailable", "Notion could not be reached or did not answer as expected. Try again.");
 };
 
-const validToken = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9_-]{20,1000}$/.test(value.trim());
-const invalidToken = () => refuse(400, "invalid_token", "Enter the connection's Notion token.");
-const credentialsUnavailable = () => refuse(503, "credentials_unavailable", "Credential encryption is unavailable on this installation.");
+/** What stops Core's connection or binding from being used yet, with Core's codes and the fix. */
+function coreBlocker({ status, binding }: CoreState): { readonly code: string; readonly message: string } | undefined {
+  if (!status.saved) return { code: "notion_not_configured", message: "Core's Notion connection is not set up. Save the Notion integration token in Settings > Integrations > Notion first." };
+  if (!status.readable) return { code: "notion_unreadable", message: "The Notion token saved in Core can't be read. Save it again in Settings > Integrations > Notion first." };
+  if (!status.enabled) return { code: "notion_disabled", message: "Core's Notion connection is turned off. Turn it on in Settings > Integrations > Notion first." };
+  if (!binding) return { code: "notion_unbound", message: "Choose the ordering database for Part Requests first." };
+  return undefined;
+}
+
 const siteUnknown = () => refuse(409, "site_address_unknown", "The dashboard address of this installation is unknown.");
 const usableSite = (site: string | undefined): site is string => Boolean(site) && site!.length <= 200;
 
-/** A new token is unproven against the saved database until the connection is checked again. */
-const tokenStatements = (db: Database, encrypted: { ciphertext: string; iv: string }, site: string, actor: string, now: number): Statement[] => [
-  db.prepare(`INSERT INTO part_requests_notion(installation_id,ciphertext,iv,address_salt,updated_ms) VALUES (?,?,?,?,?)
-    ON CONFLICT(installation_id) DO UPDATE SET ciphertext=excluded.ciphertext,iv=excluded.iv,verified_ms=NULL,rejection_code=NULL,rejected_ms=NULL,updated_ms=excluded.updated_ms`)
-    .bind(installationId, encrypted.ciphertext, encrypted.iv, randomHex(), now),
+/** Saving the dashboard address as the site address /ordering-pin sends. Verifying records it, as saving the token did in 1.1. */
+const siteStatement = (db: Database, site: string, now: number) =>
   db.prepare("INSERT INTO part_requests_settings(installation_id,site_address,updated_ms) VALUES (?,?,?) ON CONFLICT(installation_id) DO UPDATE SET site_address=excluded.site_address,updated_ms=excluded.updated_ms")
-    .bind(installationId, site, now),
-  audit(db, actor, "part_requests.token_saved", now),
-];
+    .bind(installationId, site, now);
 
 /**
- * Verifying only reads, so a missing Insert content capability outlasts it with the same token. A new token clears it first,
- * in tokenStatements, since it may belong to a different connection.
+ * Verifying only reads, so a missing Insert content capability outlasts it unless the database changed. The row is created
+ * here on a new installation; address_salt keeps client addresses out of the database (see pairing.ts).
  */
 const connectionStatements = (db: Database, schema: Schema, actor: string, now: number): Statement[] => [
-  db.prepare(`UPDATE part_requests_notion SET database_id=?1,data_source_id=?2,schema_json=?3,verified_ms=?4,schema_error=NULL,
-    rejection_code=CASE WHEN rejection_code=?7 THEN rejection_code END,rejected_ms=CASE WHEN rejection_code=?7 THEN rejected_ms END,updated_ms=?5 WHERE installation_id=?6`)
-    .bind(schema.databaseId, schema.dataSourceId, JSON.stringify(schema), now, now, installationId, insertRefused),
+  db.prepare(`INSERT INTO part_requests_notion(installation_id,address_salt,database_id,data_source_id,schema_json,verified_ms,updated_ms) VALUES (?1,?2,?3,?4,?5,?6,?6)
+    ON CONFLICT(installation_id) DO UPDATE SET database_id=excluded.database_id,data_source_id=excluded.data_source_id,schema_json=excluded.schema_json,verified_ms=excluded.verified_ms,schema_error=NULL,
+    rejection_code=CASE WHEN rejection_code=?7 AND data_source_id=excluded.data_source_id THEN rejection_code END,rejected_ms=CASE WHEN rejection_code=?7 AND data_source_id=excluded.data_source_id THEN rejected_ms END,updated_ms=excluded.updated_ms`)
+    .bind(installationId, randomHex(), schema.databaseId, schema.dataSourceId, JSON.stringify(schema), now, insertRefused),
   // Have the refresh job start from the top on its next run; this write also pokes it.
   db.prepare(`INSERT INTO part_requests_recipient_refresh(installation_id,step,next_due_ms) VALUES (?,'idle',0)
     ON CONFLICT(installation_id) DO UPDATE SET step='idle',cursor=NULL,pages=0,next_due_ms=0`).bind(installationId),
-  // The connection may now point somewhere else, so the copy of the old database's orders goes.
+  // The binding may now point somewhere else, so the copy of the old database's orders goes.
   ...clearOrdersStatements(db),
   audit(db, actor, "part_requests.connection_verified", now),
 ];
 
-async function saveToken(context: AdminRouteContext, db: Database, actor: string, now: number) {
-  const input = object(await context.json(4096));
-  if (Object.keys(input).some((key) => key !== "token") || !validToken(input.token)) return invalidToken();
-  const { credentials } = context.services;
-  if (!credentials.available) return credentialsUnavailable();
-  const site = context.dashboardOrigin;
-  if (!usableSite(site)) return siteUnknown();
-  const token = input.token.trim();
-  try { await new NotionClient(token).verifyToken(); } catch (error) { return notionFailure(error); }
-  await db.batch(tokenStatements(db, await credentials.encrypt({ token }), site, actor, now));
-  return status(context, db, now);
-}
-
-async function listDataSources(context: AdminRouteContext, db: Database) {
-  const input = object(await context.json(4096));
-  if (typeof input.databaseUrl !== "string" || input.databaseUrl.length > 2000) return refuse(400, "invalid_link", "Enter the database's Notion link.");
-  try { return json(await new NotionClient(await savedToken(await readConnection(db), context.services.credentials)).dataSources(input.databaseUrl)); }
-  catch (error) { return notionFailure(error); }
-}
-
-async function connect(context: AdminRouteContext, db: Database, actor: string, now: number) {
-  const input = object(await context.json(4096));
-  if (typeof input.databaseUrl !== "string" || input.databaseUrl.length > 2000 || input.dataSourceId !== undefined && typeof input.dataSourceId !== "string") return refuse(400, "invalid_link", "Enter the database's Notion link and data source.");
-  const row = await readConnection(db);
-  let schema: Schema;
-  try { schema = await new NotionClient(await savedToken(row, context.services.credentials)).connect(input.databaseUrl, input.dataSourceId as string | undefined, parseSchema(row)); }
-  catch (error) { return notionFailure(error); }
-  await db.batch(connectionStatements(db, schema, actor, now));
-  return status(context, db, now);
-}
-
 /**
- * POST /verify: { token?, databaseUrl, dataSourceId? }. The setup page's one Verify button. With a token it checks the token
- * and the database first and saves both together, so a failed check leaves nothing behind and a token it would replace stays.
- * The one exception is first-time setup with a database that needs a data source chosen: the token has proved itself by then and
- * there is none to lose, so it is saved and the page only asks for the choice.
+ * POST /verify: {}. The setup page's Verify button. Reads the layout of the database Core has bound for `orders`, checks it
+ * and saves it with the site address. A failed check saves nothing. The token and the database are chosen in Core.
  */
 async function verify(context: AdminRouteContext, db: Database, actor: string, now: number) {
-  const input = object(await context.json(4096));
-  if (Object.keys(input).some((key) => key !== "token" && key !== "databaseUrl" && key !== "dataSourceId")) return refuse(400, "validation", "Send the token, the database link and the data source only.");
-  if (input.token !== undefined && !validToken(input.token)) return invalidToken();
-  if (typeof input.databaseUrl !== "string" || !input.databaseUrl.trim() || input.databaseUrl.length > 2000 || input.dataSourceId !== undefined && typeof input.dataSourceId !== "string") return refuse(400, "invalid_link", "Enter the database's Notion link.");
-  const { credentials } = context.services;
-  const newToken = typeof input.token === "string" ? input.token.trim() : undefined;
-  if (newToken && !credentials.available) return credentialsUnavailable();
+  const input = object(await context.json(1024));
+  if (Object.keys(input).length) return refuse(400, "validation", "Send an empty body. The token and the ordering database are chosen in Core's Notion settings.");
   const site = context.dashboardOrigin;
-  if (newToken && !usableSite(site)) return siteUnknown();
-  const row = await readConnection(db);
-  const saveNewToken = async () => newToken ? tokenStatements(db, await credentials.encrypt({ token: newToken }), site as string, actor, now) : [];
-  try {
-    const client = new NotionClient(newToken ?? await savedToken(row, credentials));
-    if (newToken) await client.verifyToken();
-    const schema = await client.connect(input.databaseUrl, input.dataSourceId as string | undefined, parseSchema(row));
-    await db.batch([...await saveNewToken(), ...connectionStatements(db, schema, actor, now)]);
-  } catch (error) {
-    if (error instanceof AppError && error.code === "data_source_required" && newToken && !row?.ciphertext) await db.batch(await saveNewToken());
-    return notionFailure(error);
-  }
-  return status(context, db, now);
-}
-
-async function disconnect(context: AdminRouteContext, db: Database, actor: string, now: number) {
-  await db.batch([
-    db.prepare("UPDATE part_requests_notion SET ciphertext=NULL,iv=NULL,verified_ms=NULL,rejection_code=NULL,rejected_ms=NULL,updated_ms=? WHERE installation_id=?").bind(now, installationId),
-    ...clearOrdersStatements(db),
-    audit(db, actor, "part_requests.token_removed", now),
-  ]);
+  if (!usableSite(site)) return siteUnknown();
+  const { row, core } = await connectionState(db, context.services, await readConnection(db), now);
+  // Core's own order of checks reads the binding first; an Admin fixes the connection first, so say that first.
+  const blocked = coreBlocker(core);
+  if (blocked) return refuse(409, blocked.code, blocked.message);
+  let schema: Schema;
+  try { schema = await new OrdersNotion(context.services.notion).readSchema(parseSchema(row) ?? undefined); }
+  catch (error) { return verifyFailure(error); }
+  await db.batch([siteStatement(db, site, now), ...connectionStatements(db, schema, actor, now)]);
   return status(context, db, now);
 }
 
 /**
- * PUT /carts: { enabled }. The switch lives in the settings row, which holds the site address, so saving it before the token
- * records that address too, as saving the token would. Turning it off also forgets the copy of the orders.
+ * PUT /carts: { enabled }. The switch lives in the settings row, which holds the site address, so saving it before setup
+ * records that address too, as verifying would. Turning it off also forgets the copy of the orders.
  */
 async function saveCarts(context: AdminRouteContext, db: Database, actor: string, now: number) {
   const input = object(await context.json(1024));
@@ -240,9 +262,9 @@ async function saveCarts(context: AdminRouteContext, db: Database, actor: string
   return status(context, db, now);
 }
 
-/** What the setup page shows. Whether a token is saved, never the token or its ciphertext. */
+/** What the setup page shows. Core's connection as Core reports it, never a token or ciphertext. */
 async function status(context: AdminRouteContext, db: Database, now: number) {
-  const [row, settings, recipients, refresh, addresses, pairing, paired] = await Promise.all([
+  const [saved, settings, recipients, refresh, addresses, pairing, paired] = await Promise.all([
     readConnection(db),
     db.prepare("SELECT site_address AS siteAddress,carts_enabled AS cartsEnabled FROM part_requests_settings WHERE installation_id=?").bind(installationId).first<{ siteAddress: string; cartsEnabled: number }>(),
     db.prepare("SELECT COUNT(*) AS count FROM part_requests_recipients WHERE installation_id=?").bind(installationId).first<{ count: number }>(),
@@ -251,12 +273,19 @@ async function status(context: AdminRouteContext, db: Database, now: number) {
     db.prepare("SELECT paused_until_ms AS pausedUntil FROM part_requests_pairing_limits WHERE installation_id=?").bind(installationId).first<{ pausedUntil: number }>(),
     db.prepare("SELECT COUNT(*) AS count FROM part_requests_devices WHERE installation_id=? AND revoked_ms IS NULL").bind(installationId).first<{ count: number }>(),
   ]);
+  const { row, core } = await connectionState(db, context.services, saved, now);
   const pausedUntil = Number(pairing?.pausedUntil ?? 0);
   const schema = parseSchema(row);
+  const { status: notion, binding } = core;
   return json({
-    tokenSaved: Boolean(row?.ciphertext), canSaveToken: context.services.credentials.available, siteAddress: settings?.siteAddress ?? null,
+    siteAddress: settings?.siteAddress ?? null,
+    core: { saved: notion.saved, enabled: notion.enabled, readable: notion.readable, connected: notion.connected, pausedUntilMs: notion.pausedUntilMs, capabilities: notion.capabilities },
+    binding: binding ? { databaseId: binding.databaseId, dataSourceId: binding.dataSourceId, name: binding.name } : null,
+    // The database this plugin last verified, so the page can offer it while Core's binding is missing or points elsewhere.
     databaseId: row?.databaseId ?? null, dataSourceId: row?.dataSourceId ?? null, dataSourceName: schema?.dataSourceName ?? null, verifiedMs: row?.verifiedMs ?? null, schemaError: row?.schemaError ?? null,
-    problem: connectionProblem(row)?.code ?? refusedProblem(row) ?? null, rejectedMs: row?.rejectedMs ?? null, teams: schema?.properties.team.options ?? [],
+    // True only while a 1.1 token could not be handed to Core yet, for example with encryption unavailable.
+    legacyTokenSaved: Boolean(row?.ciphertext),
+    problem: adminProblem(row, core), rejectedMs: row?.rejectedMs ?? null, teams: schema?.properties.team.options ?? [],
     recipients: Number(recipients?.count ?? 0), refresh: refresh ?? null,
     // Above zero means real client addresses reach the pairing route, so wrong PINs are being counted per address.
     pairingAddressesCounted: Number(addresses?.count ?? 0),
@@ -271,13 +300,11 @@ async function status(context: AdminRouteContext, db: Database, now: number) {
 export async function setupRoute(context: AdminRouteContext): Promise<Response | undefined> {
   const path = context.url.pathname.slice("/module-setup/part-requests".length);
   const method = context.request.method;
-  const known = path === "/status" && method === "GET" || path === "/carts" && method === "PUT" || path === "/token" && (method === "PUT" || method === "DELETE") || (path === "/database" || path === "/connection" || path === "/verify") && method === "POST";
+  const known = path === "/status" && method === "GET" || path === "/carts" && method === "PUT" || path === "/verify" && method === "POST";
   if (!known) return undefined;
   const { userId } = await requireAdmin(context);
   const db = context.db as Database; const now = Date.now();
   if (path === "/status") return status(context, db, now);
-  if (path === "/token") return method === "PUT" ? saveToken(context, db, userId, now) : disconnect(context, db, userId, now);
   if (path === "/verify") return verify(context, db, userId, now);
-  if (path === "/carts") return saveCarts(context, db, userId, now);
-  return path === "/database" ? listDataSources(context, db) : connect(context, db, userId, now);
+  return saveCarts(context, db, userId, now);
 }

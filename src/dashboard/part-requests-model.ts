@@ -3,10 +3,17 @@
 export type Tone = "success" | "warning" | "error" | "neutral";
 export type Badge = { readonly label: string; readonly tone: Tone };
 
+/** Core's Notion connection as `services.notion.status()` reports it: never the token. */
+export type CoreNotion = {
+  readonly saved: boolean; readonly enabled: boolean; readonly readable: boolean; readonly connected: boolean; readonly pausedUntilMs: number | null;
+  readonly capabilities: Readonly<Record<string, "ok" | "refused" | "unknown">>;
+};
+export type OrdersBinding = { readonly databaseId: string; readonly dataSourceId: string; readonly name: string };
 export type SetupStatus = {
-  readonly tokenSaved: boolean; readonly canSaveToken: boolean; readonly siteAddress: string | null;
+  readonly siteAddress: string | null; readonly core: CoreNotion; readonly binding: OrdersBinding | null;
+  /** The database this plugin last verified, which may differ from the binding until it is verified again. */
   readonly databaseId: string | null; readonly dataSourceId: string | null; readonly dataSourceName: string | null;
-  readonly verifiedMs: number | null; readonly schemaError: string | null; readonly problem: string | null; readonly rejectedMs: number | null;
+  readonly verifiedMs: number | null; readonly schemaError: string | null; readonly legacyTokenSaved: boolean; readonly problem: string | null; readonly rejectedMs: number | null;
   readonly recipients: number; readonly refresh: { readonly step: string; readonly finishedMs: number | null; readonly lastError: string | null } | null;
   readonly pairingPausedUntilMs: number | null; readonly pairedDevices: number; readonly deviceLimit: number; readonly cartsEnabled: boolean;
 };
@@ -169,16 +176,42 @@ export const revokeMessage = (device: Pick<Device, "label" | "memberName">) =>
 // ---- Connection and status
 export const isConnected = (status: Pick<SetupStatus, "problem">) => status.problem === null;
 
+/** Where Core keeps the Notion token and lists every module's databases. */
+export const integrationsPath = "/settings/integrations";
+export const integrationsLabel = "Settings > Integrations > Notion";
+
+/** The three of Notion's five capabilities this version uses. Update content and Insert comments come with reminders, later. */
+export const neededCapabilities: readonly (readonly [string, string])[] = [["read", "Read content"], ["insert", "Insert content"], ["users", "Read user information without email addresses"]];
+
+/** What Core's connection looks like, in a few words for the Connection card. */
+export function coreState(core: CoreNotion): string {
+  if (!core.saved) return "Not set up";
+  if (!core.readable) return "Saved, but can't be read";
+  if (!core.enabled) return "Turned off";
+  return "Connected";
+}
+
+/** The previous database is worth offering when Core's binding is missing or points somewhere else. */
+export const offerPrevious = (status: Pick<SetupStatus, "databaseId" | "dataSourceId" | "binding" | "core">) =>
+  Boolean(status.core.connected && status.databaseId && status.dataSourceId && (!status.binding || status.binding.dataSourceId.replaceAll("-", "").toLowerCase() !== status.dataSourceId.replaceAll("-", "").toLowerCase()));
+
+/** Said after Core could not open the ordering database with its token. */
+export const shareDatabaseText = "Share the ordering database with the Core connection in Notion (open the database, then ••• > Connections), then choose it again.";
+
 /** What stopped requests, in words an Admin can act on, or undefined when requests can flow. */
-export function connectionProblem(status: Pick<SetupStatus, "tokenSaved" | "problem" | "schemaError"> & { readonly rejectedMs?: number | null }, timeZone?: string): string | undefined {
+export function connectionProblem(status: Pick<SetupStatus, "problem" | "schemaError"> & { readonly rejectedMs?: number | null }, timeZone?: string): string | undefined {
   if (status.problem === null) return undefined;
   const when = status.rejectedMs ? ` on ${formatDateTime(status.rejectedMs, timeZone)}` : "";
-  if (status.problem === "notion_token_rejected") return `Notion rejected the saved token${when}, so new requests and Carts refreshes will fail until this is fixed. Paired devices stay paired and the log stays. To fix it, copy a new token from Notion's connections page and replace this one.`;
-  if (status.problem === "notion_access_lost") return `Notion refused access to the ordering database${when}, so new requests and Carts refreshes will fail until this is fixed. Paired devices stay paired and the log stays. To fix it, add the connection to the database in Notion and check its capabilities, then verify the connection again.`;
-  if (status.problem === "notion_insert_refused") return `Notion refused to add a request to the ordering database${when} because the connection lacks the Insert content capability, so new requests will fail until it is turned on. Carts and the recipient list still work, since they only read. To fix it, open this connection in Notion's integration settings and turn on Insert content under its capabilities. This clears once a request goes through.`;
+  if (status.problem === "notion_not_configured") return `Core's Notion connection is not set up, so requests have stopped. Save the Notion integration token in ${integrationsLabel}, then choose the ordering database here.`;
+  if (status.problem === "notion_unreadable") return `The Notion token saved in Core can't be read, so requests have stopped. This is expected after a restore onto another installation: save the token again in ${integrationsLabel}. Every device also pairs again.`;
+  if (status.problem === "notion_disabled") return `Core's Notion connection is turned off, so requests have stopped. Turn it on in ${integrationsLabel}.`;
+  if (status.problem === "orders_unbound") return "Part Requests has no ordering database chosen in Core, so requests have stopped. Choose the ordering database below, then verify the connection.";
+  if (status.problem === "not_verified") return "The ordering database has not been checked for Part Requests, so requests have stopped. Verify the connection to turn them on.";
+  if (status.problem === "notion_token_rejected") return `Notion rejected the token saved in Core${when}, so new requests and Carts refreshes will fail until this is fixed. Paired devices stay paired and the log stays. To fix it, copy a new token from Notion's connections page and save it in ${integrationsLabel}.`;
+  if (status.problem === "notion_access_lost") return `Notion refused access to the ordering database${when}, so new requests and Carts refreshes will fail until this is fixed. Paired devices stay paired and the log stays. To fix it, share the ordering database with the Core connection in Notion and check its capabilities, then verify the connection again.`;
+  if (status.problem === "notion_insert_refused") return `Notion refused to add a request to the ordering database${when} because Core's Notion connection lacks the Insert content capability, so new requests will fail until it is turned on. Carts and the recipient list still work, since they only read. To fix it, open the connection in Notion's integration settings and turn on Insert content under its capabilities. This clears once a request goes through.`;
   if (status.problem === "notion_schema_changed") return `The Notion database no longer matches what Part Requests expects, so requests have stopped.${status.schemaError ? ` ${status.schemaError}` : ""}`;
-  if (!status.tokenSaved) return "No Notion token is saved, so requests have stopped. This is expected after a restore: save the token and verify the connection again. Every device also pairs again.";
-  return "A Notion token is saved, but the connection has not been verified, so requests have stopped. Verify the connection to turn them back on.";
+  return "The Notion connection needs attention, so requests have stopped. Verify the connection to turn them back on.";
 }
 
 export function pairingNotice(pausedUntilMs: number | null, timeZone?: string): string | undefined {
@@ -187,7 +220,7 @@ export function pairingNotice(pausedUntilMs: number | null, timeZone?: string): 
 
 export function refreshNotice(refresh: SetupStatus["refresh"], timeZone?: string): string | undefined {
   if (!refresh?.lastError) return undefined;
-  if (refresh.lastError === "notion_users_403") return "Workspace members could not be listed, so only people named on existing requests are being added. Check that the connection has the Read user information capability.";
+  if (refresh.lastError === "notion_users_403") return "Workspace members could not be listed, so only people named on existing requests are being added. Check that Core's Notion connection has the Read user information capability.";
   return `The last refresh could not finish. It tries again within an hour.${refresh.finishedMs ? ` The list from ${formatDateTime(refresh.finishedMs, timeZone)} is still in use.` : ""}`;
 }
 

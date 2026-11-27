@@ -7,7 +7,7 @@ import { registerHooks } from "node:module";
 import { createHarness, dashboard, discordB, testCredentials, type Harness } from "./helpers/harness.ts";
 import { dataSource, dataSourceId, databaseId, guestPerson, namelessGuest, notionResponse, otherDataSourceId, stubNotion, testToken, type Call, type Stub } from "./helpers/notion-stub.ts";
 import manifest from "../src/manifest.ts";
-import { NotionClient, type Schema } from "../src/notion.ts";
+import { OrdersNotion, type Schema } from "../src/notion.ts";
 import { cartMarkLifetimeMs, cartsDisabledMessage, maximumMarksPerDevice, maximumMarksPerRequest, maximumOrderPages, openStatuses, ordersFreshMs, ordersPageSize, ordersRefreshFloorMs, ordersStaleLimitMs, orderFromRow } from "../src/orders.ts";
 import { maximumGeneral } from "../src/requests.ts";
 
@@ -113,7 +113,9 @@ test("the fetch receiver: Notion is called as a plain function, in every path th
   const strict = globalThis.fetch;
   globalThis.fetch = function (this: unknown, input: any, init?: any) { received.push(this); return strict.call(undefined, input, init); } as typeof fetch;
   answerWith(row(1));
-  const page = await new NotionClient(testToken).openOrdersPage({ dataSourceId, properties: { status: { id: "s", type: "status" } } } as unknown as Schema, [{ id: "n", name: "NORMAL Request" }], 50);
+  await h.core.connect();
+  h.core.bind({ databaseId, dataSourceId, name: "Ordering" });
+  const page = await new OrdersNotion(h.services().notion as any).openOrdersPage({ dataSourceId, properties: { status: { id: "s", type: "status" } } } as unknown as Schema, [{ id: "n", name: "NORMAL Request" }], 50);
   assert.equal(page.rows.length, 1);
   assert.deepEqual(received, [undefined]);
 });
@@ -350,6 +352,7 @@ test("cache: failures with nothing to serve say what to do, with only fixed mess
   const cases: [number, Record<string, string>, number, string][] = [[401, {}, 503, "notion_access_lost"], [403, {}, 503, "notion_access_lost"], [404, {}, 503, "notion_access_lost"], [429, { "retry-after": "90" }, 503, "notion_rate_limited"], [400, {}, 502, "notion_unavailable"], [500, {}, 502, "notion_unavailable"]];
   for (const [notion, headers, status, code] of cases) {
     noBackoff();
+    h.core.state.pausedUntilMs = 0; // Core's shared pause after the 429 has passed
     stub.on(queryPath, () => notionResponse({ message: `private detail ${testToken}` }, notion, headers));
     const answer = await get(key);
     assert.equal(answer.status, status, String(notion));
@@ -360,6 +363,7 @@ test("cache: failures with nothing to serve say what to do, with only fixed mess
     assert.match(JSON.stringify(h.test.rows("SELECT last_error FROM part_requests_orders_state")), new RegExp(`notion_${notion}`));
   }
   noBackoff();
+  h.core.state.pausedUntilMs = 0;
   stub.on(queryPath, () => { throw new TypeError(`network ${testToken}`); });
   const network = await get(key);
   assert.equal(network.status, 502);
@@ -400,38 +404,60 @@ test("cache: a lost race for the claim is the same wait", async () => {
   answerWith(row(1));
   const answers = await Promise.all([get(key), get(other)]);
   assert.equal(queries().length, 1);
-  assert.deepEqual(answers.map((answer) => answer.status).sort(), [200, 202]);
+  // The loser either lost the claim and waits (202), or arrived once the winner had published and was served that copy.
+  assert.ok(answers.some((answer) => answer.status === 200 && answer.body.orders.length === 1));
+  for (const answer of answers) assert.ok(answer.status === 202 && answer.body.state === "refreshing" || answer.status === 200 && answer.body.orders.length === 1, answer.text);
 });
 
-test("cache: connecting again and removing the token forget the copy", async () => {
+test("cache: verifying another database forgets the copy, and Core's connection going away stops Carts", async () => {
   const key = await ready();
   answerWith(row(1));
   await get(key);
   assert.equal(h.test.rows("SELECT * FROM part_requests_orders_cache").length, 1);
-  stub.dataSources = [{ id: dataSourceId, name: "Ordering" }, { id: otherDataSourceId, name: "Archive" }];
-  await h.admin("POST", "/connection", { databaseUrl: databaseId, dataSourceId: otherDataSourceId });
+  h.core.bind({ databaseId, dataSourceId: otherDataSourceId, name: "Archive" });
+  assert.equal((await get(key)).body.code, "notion_not_connected", "a database whose layout was not checked is not read");
+  await h.admin("POST", "/verify", {});
   assert.equal(h.test.rows("SELECT * FROM part_requests_orders_cache").length, 0);
   stub.calls.length = 0;
   stub.on(/^POST \/data_sources\//, () => list([row(2)]));
   const moved = await get(key);
   assert.equal(moved.body.orders[0].id, orderId(2));
   assert.ok(stub.calls[0]!.url.includes(otherDataSourceId));
-  await h.admin("DELETE", "/token");
-  assert.equal(h.test.rows("SELECT * FROM part_requests_orders_cache").length, 0);
+  h.core.state.connection = null;
+  stub.calls.length = 0;
   const stopped = await get(key);
+  assert.equal(stub.calls.length, 0);
   assert.equal(stopped.status, 503);
   assert.equal(stopped.body.code, "notion_not_connected");
 });
 
-test("cache: a changed database answers schema_changed, and an unreadable token says so, with no Notion call", async () => {
+test("cache: a changed database answers schema_changed, and a token Core can't read stops Carts, with no Notion call", async () => {
   const key = await ready();
   h.test.run("UPDATE part_requests_notion SET schema_error='broken'");
   assert.equal((await get(key)).body.code, "notion_schema_changed");
-  h.test.run("UPDATE part_requests_notion SET schema_error=NULL,ciphertext='AAAA'");
+  h.test.run("UPDATE part_requests_notion SET schema_error=NULL");
+  h.core.state.connection!.readable = false;
   const unreadable = await get(key);
   assert.equal(unreadable.status, 503);
-  assert.equal(unreadable.body.code, "credentials_unreadable");
+  assert.equal(unreadable.body.code, "notion_not_connected");
   assert.equal(queries().length, 0);
+});
+
+test("cache: Core's shared pause after a rate limit serves the copy, then reads again once it is over", async () => {
+  const key = await ready();
+  answerWith(row(1));
+  await get(key);
+  ageCopy(ordersFreshMs);
+  h.core.state.pausedUntilMs = Date.now() + 20_000; // another module was rate limited
+  stub.calls.length = 0;
+  const served = await get(key);
+  assert.equal(served.status, 200);
+  assert.equal(served.body.refreshError, "notion_429");
+  assert.equal(queries().length, 0, "Core held the call");
+  h.core.state.pausedUntilMs = 0;
+  noBackoff();
+  assert.equal((await get(key)).body.refreshError, null);
+  assert.equal(queries().length, 1);
 });
 
 test("the job prunes a copy nobody has used for a day, and expired marks", async () => {
@@ -487,7 +513,7 @@ test("rate limit: an over-limit device gets the copy, or 429 with none, and no N
   assert.equal(queries().length, 0);
   const lease = h.test.rows<{ lease_until_ms: number }>("SELECT lease_until_ms FROM part_requests_orders_state")[0]!;
   assert.equal(lease.lease_until_ms, 0, "and it holds no lease");
-  await h.admin("POST", "/connection", { databaseUrl: databaseId, dataSourceId });
+  await h.admin("POST", "/verify", {});
   stub.calls.length = 0;
   const refused = await get(key);
   assert.equal(refused.status, 429);
@@ -640,7 +666,7 @@ test("switch: revoked devices get pair_again before the switch is mentioned", as
   assert.equal((await get(key)).body.code, "pair_again");
 });
 
-test("switch: Admin only, from the dashboard, with a boolean, audited, and it can be set before the token", async () => {
+test("switch: Admin only, from the dashboard, with a boolean, audited, and it can be set before setup", async () => {
   assert.equal((await carts(false, { role: "operator", origin: dashboard })).status, 403);
   assert.equal((await carts(false, {})).status, 403, "not from the dashboard");
   assert.equal(h.test.rows("SELECT * FROM part_requests_settings").length, 0);
@@ -650,7 +676,7 @@ test("switch: Admin only, from the dashboard, with a boolean, audited, and it ca
   assert.equal(off.status, 200);
   assert.equal(off.body.cartsEnabled, false);
   assert.equal(off.body.siteAddress, dashboard);
-  assert.equal(off.body.problem, "notion_not_connected", "it does not count as setup");
+  assert.equal(off.body.problem, "notion_not_configured", "it does not count as setup");
   assert.equal(await api.setup.stepValid(h.db, "notion-connection"), false);
   await h.connect();
   assert.equal((await h.admin("GET", "/status")).body.cartsEnabled, false, "connecting does not turn it back on");
@@ -700,6 +726,7 @@ test("refused: a 401, 403 or 404 reading orders shows on the Admin page and the 
     noBackoff(); ageCopy(0);
     await get(key);
     assert.equal(await status(), problem, String(code));
+    h.core.state.pausedUntilMs = 0; // Core's shared pause after the 429 has passed
     stub.restore(); stub = stubNotion();
     stub.on(queryPath, () => notionResponse({ object: "list", results: [], has_more: false, next_cursor: null }));
     noBackoff();
@@ -721,14 +748,12 @@ test("the Notion token is in no answer, no table, and only ever in the Authoriza
   for (const call of queries()) { assert.ok(!JSON.stringify(call.body).includes(testToken)); assert.ok(!call.url.includes(testToken)); }
 });
 
-test("credentials being unavailable is an Admin's problem, stated plainly, with no Notion call", async () => {
-  const shared = testCredentials();
-  h = createHarness(api, { credentials: shared });
+test("Core's connection turned off is an Admin's problem, stated plainly, with no Notion call", async () => {
   const key = await ready();
-  (shared as { available: boolean }).available = false;
+  h.core.state.connection!.enabled = false;
   const answer = await get(key);
   assert.equal(answer.status, 503);
-  assert.equal(answer.body.code, "credentials_unavailable");
+  assert.equal(answer.body.code, "notion_not_connected");
   assert.equal(queries().length, 0);
 });
 
@@ -741,6 +766,8 @@ test("query counts: Workers Free sized", async () => {
   const refresh = await measure(() => get(key));
   assert.equal(queries().length, 1);
   assert.ok(refresh <= 4, `a refresh of one page: ${refresh}`);
+  assert.equal(h.coreCost.last.notion, 1, "one Notion request through Core");
+  assert.ok(h.coreCost.last.d1 <= 2, `Core read ${h.coreCost.last.d1} times`);
   assert.equal(await measure(() => get(key)), 2, "a cached read: the checks, then the copy and the marks");
   assert.ok(await measure(() => mark(key, [{ orderId: orderId(1), quantity: 1 }])) <= 4);
   assert.ok(await measure(() => clear(key)) <= 3);

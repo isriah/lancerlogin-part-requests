@@ -1,18 +1,25 @@
-// The Notion client against a fetch-boundary stub. Keeps the intent of the extension's tests and adds its live-tested traps.
+// The ordering database through Core's `services.notion` (a stand-in modelled on Core's), with Notion stubbed at the fetch
+// boundary. Keeps the intent of the extension's tests and its live-tested traps.
 import test, { afterEach, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { AppError, NotionClient, mapSchema, notionId, notionVersion, pagePayload, parseDraft, statusIncomplete, validateDraft, type RequestDraft, type Schema } from "../src/notion.ts";
+import { AppError, OrdersNotion, mapSchema, notionFailure, pageProperties, parseDraft, statusIncomplete, validateDraft, type RequestDraft, type Schema } from "../src/notion.ts";
 import { productSkuKey, productUrlKey, vendorForUrl, vendors } from "../src/vendors.ts";
 import { dataSource, dataSourceId, databaseId, guestPerson, memberPerson, namelessGuest, notionResponse, otherDataSourceId, stubNotion, testToken, type Stub } from "./helpers/notion-stub.ts";
-import { goodDraft } from "./helpers/harness.ts";
+import { createCoreNotion, CoreHttpError, type CoreNotion, type Cost } from "./helpers/core-notion-stub.ts";
+import { goodDraft, testCredentials } from "./helpers/harness.ts";
 
 let stub: Stub;
-beforeEach(() => { stub = stubNotion(); });
+let core: CoreNotion;
+beforeEach(async () => { stub = stubNotion(); core = createCoreNotion(testCredentials()); await core.connect(); core.bind({ databaseId, dataSourceId, name: "Ordering" }); });
 afterEach(() => { stub.restore(); });
 
 const schema = (): Schema => mapSchema(dataSource(), databaseId);
-const client = () => new NotionClient(testToken);
+const cost = (): Cost => ({ d1: 0, external: 0, notion: 0 });
+/** A new invocation each time, as Core gives each request its own `services.notion`. */
+const service = () => core.service(cost()) as any;
+const client = () => new OrdersNotion(service());
 const draft = (overrides = {}) => goodDraft(overrides) as RequestDraft;
+const page = (url: unknown) => notionResponse({ object: "page", id: crypto.randomUUID(), url });
 const rejects = async (work: Promise<unknown>, expected: { code?: string; uncertain?: boolean }) => {
   await assert.rejects(work, (error: unknown) => {
     assert.ok(error instanceof AppError, String(error));
@@ -22,37 +29,59 @@ const rejects = async (work: Promise<unknown>, expected: { code?: string; uncert
   });
 };
 
-test("Notion links: notion.so, notion.com and notion.site are accepted, the view is ignored, lookalikes are refused", () => {
-  const hex = databaseId.replaceAll("-", "");
-  for (const link of [`https://app.notion.com/p/${hex}?v=99999999999999999999999999999999`, `https://www.notion.so/${hex}?v=99999999999999999999999999999999`, `https://some-team.notion.site/${hex}`, databaseId, hex]) assert.equal(notionId(link), databaseId, link);
-  for (const link of [`https://notion.so.evil.example.test/${hex}`, `https://notion.com.evil.example.test/p/${hex}`, `https://evilnotion.com/p/${hex}`, `https://example.test/?v=${hex}`, `http://www.notion.so/${hex}`, `https://user:pass@www.notion.so/${hex}`]) assert.throws(() => notionId(link), AppError, link);
-});
-
-test("native fetch is called without a receiver and with options Workers accepts (Illegal invocation regression)", async () => {
-  // The stub throws "Illegal invocation" for a receiver, and a TypeError for redirect "error" and for credentials.
-  assert.equal(await client().create(pagePayload(draft(), schema())), "https://app.notion.com/p/created-request");
+test("every call names the orders binding: Core sends it to the bound data source with Core's token", async () => {
+  assert.equal(await client().create(pageProperties(draft(), schema())), "https://app.notion.com/p/created-request");
   const call = stub.calls[0]!;
   assert.equal(call.url, "https://api.notion.com/v1/pages");
-  assert.equal(call.headers["Notion-Version"], notionVersion);
-  assert.equal(notionVersion, "2026-03-11");
+  assert.deepEqual(call.body.parent, { type: "data_source_id", data_source_id: dataSourceId }, "Core adds the parent from the binding");
+  assert.equal(call.headers.Authorization, `Bearer ${testToken}`);
+  core.bind({ databaseId, dataSourceId: otherDataSourceId, name: "Archive" });
+  await client().requestPeoplePage(schema(), 50).catch(() => undefined); // the fetch stub only knows the first data source
+  assert.equal(stub.calls[1]!.url, `https://api.notion.com/v1/data_sources/${otherDataSourceId}/query`);
 });
 
-test("the database is read, then the data source, by their IDs", async () => {
-  const mapped = await client().connect(`https://app.notion.com/p/${databaseId.replaceAll("-", "")}`, undefined);
+test("the layout is read from the bound data source and named after the binding", async () => {
+  const mapped = await client().readSchema();
   assert.equal(mapped.dataSourceId, dataSourceId);
-  assert.deepEqual(stub.calls.map((call) => call.url), [`https://api.notion.com/v1/databases/${databaseId}`, `https://api.notion.com/v1/data_sources/${dataSourceId}`]);
-});
-
-test("several data sources need an explicit choice, and a choice outside the list is refused", async () => {
-  stub.dataSources = [{ id: dataSourceId, name: "Ordering" }, { id: otherDataSourceId, name: "Archive" }];
-  await rejects(client().connect(databaseId, undefined), { code: "data_source_required" });
-  assert.equal(stub.calls.length, 1);
-  await rejects(client().connect(databaseId, "not-one-of-them"), { code: "data_source_required" });
-  assert.equal((await client().connect(databaseId, otherDataSourceId)).dataSourceId, otherDataSourceId);
+  assert.equal(mapped.databaseId, databaseId);
+  assert.equal(mapped.dataSourceName, "Ordering");
+  assert.deepEqual(stub.calls.map((call) => call.url), [`https://api.notion.com/v1/data_sources/${dataSourceId}`]);
+  // A rename in Notion keeps its mapping only for the same data source.
+  const renamed = dataSource(); renamed.properties.Recipients = { ...renamed.properties["Orderer/Recipient"], id: "a%3Ab" }; delete renamed.properties["Orderer/Recipient"];
+  stub.source = renamed;
+  assert.equal((await client().readSchema(schema())).properties.recipient.id, "a%3Ab");
+  await rejects(client().readSchema({ ...schema(), dataSourceId: otherDataSourceId }), { code: "schema" });
 });
 
 test("an unshared database is a clear 404, not an uncertain result", async () => {
-  await rejects(client().connect("99999999-2222-4333-8444-555555555555", undefined), { code: "notion_404", uncertain: false });
+  stub.on(/^GET \/data_sources\//, () => notionResponse({ code: "object_not_found" }, 404));
+  await rejects(client().readSchema(), { code: "notion_404", uncertain: false });
+});
+
+test("Core's refusals keep their codes and say what to fix; anything that is not Notion's is passed on as it is", async () => {
+  core.state.bindings.clear();
+  await rejects(client().create({ title: {} }), { code: "notion_unbound", uncertain: false });
+  await rejects(client().readSchema(), { code: "notion_unbound" });
+  assert.equal(stub.calls.length, 0, "refused before any request");
+  core.bind({ databaseId, dataSourceId, name: "Ordering" });
+  core.state.connection!.readable = false;
+  await assert.rejects(client().usersPage(), (error: unknown) => error instanceof AppError && error.code === "notion_unreadable" && /Settings > Integrations > Notion/.test(error.message));
+  core.state.connection!.readable = true;
+  core.state.pausedUntilMs = Date.now() + 4_500;
+  await assert.rejects(client().usersPage(), (error: unknown) => error instanceof AppError && error.code === "notion_429" && (error.details as { retryAfterSeconds: number }).retryAfterSeconds === 5);
+  core.state.pausedUntilMs = 0;
+  core.state.deliveryPausedUntil = Date.now() + 1000;
+  await assert.rejects(client().create({ title: {} }), CoreHttpError, "deliveries paused: Core's own error, which uncertain() reports as not sent");
+  const notion = service();
+  assert.equal(notionFailure(notion, new Error("D1 failed")), undefined);
+  assert.equal(notion.uncertain(new CoreHttpError(409, "paused")), false);
+});
+
+test("Core's cap of 8 Notion requests in one invocation is a refusal with its own code", async () => {
+  const shared = new OrdersNotion(service());
+  for (let index = 0; index < 8; index++) await shared.usersPage();
+  await rejects(shared.usersPage(), { code: "notion_call_limit" });
+  assert.equal(stub.calls.length, 8);
 });
 
 test("schema: wrong types, missing vendors and missing statuses are refused; renames keep their mapping, compared decoded", () => {
@@ -87,10 +116,8 @@ test("validation: a NORMAL request needs every field but SKU; an Incomplete one 
 
 test("the page is created with properties only; the vendor comes from the URL; the formula is never written", () => {
   const map = schema();
-  const payload = pagePayload(draft({ url: "https://andymark.com/products/test-shaft?variant=123#selected", recipient: guestPerson }), map);
-  assert.deepEqual(Object.keys(payload).sort(), ["parent", "properties"]);
-  assert.deepEqual(payload.parent, { type: "data_source_id", data_source_id: dataSourceId });
-  const properties = payload.properties;
+  const properties = pageProperties(draft({ url: "https://andymark.com/products/test-shaft?variant=123#selected", recipient: guestPerson }), map);
+  assert.equal(properties.parent, undefined, "Core adds the parent from the binding");
   assert.deepEqual(properties.v3nd.select.id, `v3nd-${vendors.findIndex((vendor) => vendor.label === "AndyMark")}`);
   assert.deepEqual(properties.t3am, { multi_select: [{ id: "team-1" }] });
   assert.deepEqual(properties["st%40t"], { status: { id: "normal" } });
@@ -100,26 +127,28 @@ test("the page is created with properties only; the vendor comes from the URL; t
 
 test("create: only Notion's own hosts count as a confirmed page link, including app.notion.com", async () => {
   for (const url of ["https://www.notion.so/new", "https://app.notion.com/p/new"]) {
-    stub.on(/^POST \/pages$/, () => notionResponse({ url }));
-    assert.equal(await client().create({}), url);
+    stub.on(/^POST \/pages$/, () => page(url));
+    assert.equal(await client().create({ title: {} }), url);
   }
   for (const url of ["https://notion.com.evil.example.test/p/new", "javascript:alert(1)", undefined]) {
-    stub.on(/^POST \/pages$/, () => notionResponse({ url }));
-    await rejects(client().create({}), { uncertain: true });
+    stub.on(/^POST \/pages$/, () => page(url));
+    await rejects(client().create({ title: {} }), { uncertain: true });
   }
 });
 
 test("create: each failure is classified as certain or uncertain, and POST is never retried", async () => {
   for (const [status, uncertain] of [[400, false], [401, false], [403, false], [404, false], [429, false], [409, true], [500, true], [503, true], [302, true]] as const) {
     stub = (stub.restore(), stubNotion());
+    core.state.pausedUntilMs = 0;
     stub.on(/^POST \/pages$/, () => notionResponse({ message: "secret detail from Notion" }, status, { "retry-after": "3" }));
-    await rejects(client().create({}), { code: `notion_${status}`, uncertain });
+    await rejects(client().create({ title: {} }), { code: `notion_${status}`, uncertain });
     assert.equal(stub.calls.length, 1, String(status));
   }
+  core.state.pausedUntilMs = 0;
   stub.on(/^POST \/pages$/, () => { throw new TypeError("network"); });
-  await rejects(client().create({}), { code: "notion_network", uncertain: true });
+  await rejects(client().create({ title: {} }), { code: "notion_network", uncertain: true });
   stub.on(/^POST \/pages$/, () => new Response("{bad"));
-  await rejects(client().create({}), { code: "notion_response", uncertain: true });
+  await rejects(client().create({ title: {} }), { code: "notion_response", uncertain: true });
 });
 
 test("no client error carries the token or Notion's reply, even when Notion echoes them", async () => {
@@ -127,11 +156,12 @@ test("no client error carries the token or Notion's reply, even when Notion echo
     () => { throw new Error(`socket closed ${testToken}`); },
     ...[400, 401, 403, 404, 409, 429, 500, 302].map((status) => () => notionResponse({ message: `echo ${testToken}` }, status)),
     () => new Response(`{bad ${testToken}`),
-    () => notionResponse({ url: `https://evil.example.test/${testToken}` }),
+    () => page(`https://evil.example.test/${testToken}`),
   ];
   for (const failure of failures) {
+    core.state.pausedUntilMs = 0;
     stub.on(/^POST \/pages$/, failure);
-    await assert.rejects(client().create({}), (error: unknown) => {
+    await assert.rejects(client().create({ title: {} }), (error: unknown) => {
       assert.ok(error instanceof AppError);
       assert.ok(!`${error.message} ${error.code} ${JSON.stringify(error.details)} ${error.stack}`.includes(testToken));
       return true;

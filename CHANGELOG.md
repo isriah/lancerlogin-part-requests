@@ -4,6 +4,22 @@ All notable changes to this plugin. Versions follow LancerLogin's release rules:
 
 Add a `## [X.Y.Z] - YYYY-MM-DD` entry above older entries for each stable or beta release.
 
+## [1.2.0] - Unreleased
+
+Requires LancerLogin Core `>=2.1.0-beta.12 <3.0.0` (module SDK `^1.8.0`). [Release notes](docs/releases/v1.2.0.md).
+
+### Changed
+
+- Notion goes through Core's shared connection (`services.notion`) with the `orders` binding. The token lives in **Settings > Integrations > Notion**; the plugin keeps none. The manifest declares `orders` with `retrieve`, `query` and `pages.create`, and users `list` and `retrieve`.
+- A token saved by 1.1 moves to Core on first use (`importLegacyConnection`) and the plugin's copy is cleared. The columns stay, empty; no migration.
+- The setup step and every public route depend on Core's connection, the `orders` binding and the layout verified for that data source. `POST /verify` takes `{}`.
+- Notion calls now count against the scheduler's budget, like Discord.
+- Requests answer `503 delivery_paused` while Core holds deliveries.
+
+### Removed
+
+- The plugin's Notion client, token entry, Replace and Remove, and `PUT /token`, `DELETE /token`, `POST /database` and `POST /connection`.
+
 ## [1.1.0] - 2026-11-09
 
 Requires LancerLogin Core `>=2.1.0-beta.7 <3.0.0`. [Release notes](docs/releases/v1.1.0.md).

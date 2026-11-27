@@ -26,78 +26,97 @@ const row = (id: string) => h.test.rows<any>("SELECT * FROM part_requests_submis
 
 // ---- Setup, Admin only
 
-test("setup: token, then database, then connection; the site address comes from the dashboard origin", async () => {
-  assert.equal((await h.admin("GET", "/status")).body.problem, "notion_not_connected");
-  const saved = await h.admin("PUT", "/token", { token: testToken });
-  assert.equal(saved.status, 200);
-  assert.equal(saved.body.tokenSaved, true);
-  assert.equal(saved.body.siteAddress, dashboard);
-  assert.equal(saved.body.problem, "notion_not_connected", "a saved token alone is not a connection");
-  const sources = await h.admin("POST", "/database", { databaseUrl: `https://app.notion.com/p/${databaseId.replaceAll("-", "")}` });
-  assert.deepEqual(sources.body, { databaseId, dataSources: [{ id: dataSourceId, name: "Ordering" }] });
+test("setup: Core's connection, then the ordering database, then verify; the site address comes from the dashboard origin", async () => {
+  const first = await h.admin("GET", "/status");
+  assert.equal(first.body.problem, "notion_not_configured");
+  assert.equal(first.body.core.saved, false);
+  assert.equal(first.body.binding, null);
+  assert.equal(first.body.siteAddress, null);
+  assert.equal((await h.admin("POST", "/verify", {})).body.code, "notion_not_configured");
+  await h.core.connect();
+  assert.equal((await h.admin("GET", "/status")).body.problem, "orders_unbound", "a connection alone is not a database");
+  assert.equal((await h.admin("POST", "/verify", {})).body.code, "notion_unbound");
+  h.core.bind({ databaseId, dataSourceId, name: "Ordering" });
+  const unverified = await h.admin("GET", "/status");
+  assert.equal(unverified.body.problem, "not_verified");
+  assert.deepEqual(unverified.body.binding, { databaseId, dataSourceId, name: "Ordering" });
   assert.equal(await api.setup.stepValid(h.db, "notion-connection"), false);
-  const connected = await h.admin("POST", "/connection", { databaseUrl: databaseId, dataSourceId });
-  assert.equal(connected.status, 200);
-  assert.equal(connected.body.problem, null);
-  assert.deepEqual(connected.body.teams.map((team: { name: string }) => team.name), ["Test Team One", "Test Team Two"]);
+  stub.calls.length = 0;
+  const verified = await h.admin("POST", "/verify", {});
+  assert.equal(verified.status, 200);
+  assert.equal(verified.body.problem, null);
+  assert.equal(verified.body.siteAddress, dashboard);
+  assert.equal(verified.body.dataSourceName, "Ordering");
+  assert.equal(verified.body.core.connected, true);
+  assert.deepEqual(verified.body.teams.map((team: { name: string }) => team.name), ["Test Team One", "Test Team Two"]);
+  assert.deepEqual(stub.calls.map((call) => `${call.method} ${call.url}`), [`GET https://api.notion.com/v1/data_sources/${dataSourceId}`], "one read of the bound data source, through Core");
+  assert.equal(stub.calls[0]!.headers.Authorization, `Bearer ${testToken}`, "with Core's token");
   assert.equal(await api.setup.stepValid(h.db, "notion-connection"), true);
   assert.equal(await api.setup.stepValid(h.db, "something-else"), false);
+  assert.equal(h.test.rows("SELECT * FROM audit_log WHERE action='part_requests.connection_verified' AND actor_user_id='u-admin'").length, 1);
 });
 
-test("setup's predicate is the same check Core runs inside its own SQL", async () => {
+test("setup's predicate is the same check Core runs inside its own SQL, and needs no token in the plugin", async () => {
   const predicate = api.setup.predicates["notion-connection"]("primary");
   const holds = () => Object.values(h.test.rows(`SELECT (${predicate.sql}) AS ok`, ...predicate.bindings)[0] as object)[0];
   assert.equal(holds(), 0);
   await h.connect();
   assert.equal(holds(), 1);
-  await h.admin("PUT", "/token", { token: testToken });
-  assert.equal(holds(), 0, "a replaced token must be verified against the database again");
+  assert.equal(h.test.rows("SELECT * FROM part_requests_notion WHERE ciphertext IS NOT NULL").length, 0);
+  // Core keeps a module open once setup is complete, so a problem in Core's connection shows on every request instead.
+  h.core.state.connection = null;
+  assert.equal(holds(), 1);
+  assert.equal((await h.admin("GET", "/status")).body.problem, "notion_not_configured");
 });
 
-test("setup: several data sources need a choice and offer the list", async () => {
-  stub.dataSources = [{ id: dataSourceId, name: "Ordering" }, { id: otherDataSourceId, name: "Archive" }];
-  await h.admin("PUT", "/token", { token: testToken });
-  const refused = await h.admin("POST", "/connection", { databaseUrl: databaseId });
-  assert.equal(refused.status, 409);
-  assert.equal(refused.body.code, "data_source_required");
-  assert.equal(refused.body.dataSources.length, 2);
-  assert.equal((await h.admin("POST", "/connection", { databaseUrl: databaseId, dataSourceId: otherDataSourceId })).status, 200);
+test("setup: Core's turned-off or unreadable connection, and a database Core's token can't open, are refused with what to fix", async () => {
+  await h.connect();
+  h.core.state.connection!.enabled = false;
+  assert.equal((await h.admin("POST", "/verify", {})).body.code, "notion_disabled");
+  assert.equal((await h.admin("GET", "/status")).body.problem, "notion_disabled");
+  h.core.state.connection!.enabled = true; h.core.state.connection!.readable = false;
+  const unreadable = await h.admin("POST", "/verify", {});
+  assert.equal(unreadable.status, 409);
+  assert.equal(unreadable.body.code, "notion_unreadable");
+  assert.match(unreadable.body.error, /Settings > Integrations > Notion/);
+  h.core.state.connection!.readable = true;
+  stub.on(/^GET \/data_sources/, () => notionResponse({ code: "object_not_found" }, 404));
+  assert.equal((await h.admin("POST", "/verify", {})).body.code, "notion_404");
+  stub.on(/^GET \/data_sources/, () => notionResponse({ code: "unauthorized" }, 401));
+  assert.equal((await h.admin("POST", "/verify", {})).body.code, "notion_token_rejected");
+  stub.on(/^GET \/data_sources/, () => notionResponse({}, 429, { "retry-after": "2" }));
+  assert.equal((await h.admin("POST", "/verify", {})).body.code, "notion_rate_limited");
 });
 
 test("setup: a schema mismatch is refused, says what is wrong, and leaves the connection unverified", async () => {
-  await h.admin("PUT", "/token", { token: testToken });
+  await h.core.connect();
+  h.core.bind({ databaseId, dataSourceId, name: "Ordering" });
   delete stub.source.properties.SKU;
-  const refused = await h.admin("POST", "/connection", { databaseUrl: databaseId, dataSourceId });
+  const refused = await h.admin("POST", "/verify", {});
   assert.equal(refused.status, 422);
   assert.equal(refused.body.code, "schema_mismatch");
   assert.match(refused.body.error, /SKU/);
   assert.equal(await api.setup.stepValid(h.db, "notion-connection"), false);
+  assert.equal(h.test.rows("SELECT * FROM part_requests_settings").length, 0, "a failed check saves nothing, not even the site address");
 });
 
-test("setup: a rejected token is not saved; a bad token, a lookalike link and an unshared database get clear refusals", async () => {
-  stub.on(/^GET \/users\/me$/, () => notionResponse({ code: "unauthorized" }, 401));
-  const rejected = await h.admin("PUT", "/token", { token: "ntn_aDifferentTokenThatNotionRejects000000" });
-  assert.equal(rejected.body.code, "notion_token_rejected");
-  assert.equal(h.test.rows("SELECT * FROM part_requests_notion").length, 0);
-  for (const bad of [{ token: "short" }, { token: "has spaces in it which is not a token" }, { token: 5 }, { token: testToken, extra: 1 }, {}]) assert.equal((await h.admin("PUT", "/token", bad)).body.code, "invalid_token", JSON.stringify(bad));
-  stub = (stub.restore(), stubNotion());
-  await h.admin("PUT", "/token", { token: testToken });
-  assert.equal((await h.admin("POST", "/connection", { databaseUrl: `https://notion.so.evil.example.test/${databaseId.replaceAll("-", "")}` })).body.code, "invalid_link");
-  assert.equal((await h.admin("POST", "/connection", { databaseUrl: "99999999-2222-4333-8444-555555555555" })).body.code, "notion_404");
-});
-
-test("setup: credential encryption being unavailable stops a save", async () => {
-  h = createHarness(api, { credentials: testCredentials(false) });
-  const refused = await h.admin("PUT", "/token", { token: testToken });
-  assert.equal(refused.status, 503);
-  assert.equal(refused.body.code, "credentials_unavailable");
+test("setup: verify takes no token, link or data source; those are chosen in Core", async () => {
+  await h.connect();
+  for (const body of [{ token: testToken }, { databaseUrl: databaseId }, { dataSourceId }]) {
+    const refused = await h.admin("POST", "/verify", body);
+    assert.equal(refused.status, 400, JSON.stringify(body));
+    assert.equal(refused.body.code, "validation");
+  }
+  for (const [method, path] of [["PUT", "/token"], ["DELETE", "/token"], ["POST", "/database"], ["POST", "/connection"]] as const) {
+    assert.equal((await h.admin(method, path, { token: testToken })).status, 404, `${method} ${path} is gone`);
+  }
 });
 
 test("Admin only: Operators, signed-out visitors and other origins are refused on every setup and Admin route", async () => {
   await h.connect();
   stub.calls.length = 0;
   const routes = [
-    ["GET", "/module-setup/part-requests/status"], ["PUT", "/module-setup/part-requests/token"], ["DELETE", "/module-setup/part-requests/token"], ["POST", "/module-setup/part-requests/database"], ["POST", "/module-setup/part-requests/connection"],
+    ["GET", "/module-setup/part-requests/status"], ["POST", "/module-setup/part-requests/verify"], ["PUT", "/module-setup/part-requests/carts"],
     ["GET", "/admin/part-requests/requests"], ["GET", "/admin/part-requests/devices"], ["POST", "/admin/part-requests/devices/revoke"], ["POST", "/admin/part-requests/recipients/refresh"], ["POST", "/admin/part-requests/pins"],
   ] as const;
   for (const [method, path] of routes) {
@@ -109,7 +128,7 @@ test("Admin only: Operators, signed-out visitors and other origins are refused o
     }
   }
   assert.equal(stub.calls.length, 0);
-  assert.equal(h.test.rows("SELECT * FROM part_requests_notion WHERE ciphertext IS NOT NULL").length, 1);
+  assert.equal(h.test.rows("SELECT * FROM part_requests_notion WHERE verified_ms IS NOT NULL").length, 1);
 });
 
 test("the manifest declares the Operator capability Core needs for /admin routes, and the routes it serves", async () => {
@@ -130,10 +149,10 @@ test("the token never appears in a response, a log line, the database, or an err
   const seen: string[] = [];
   const record = async (work: Promise<{ text: string }>) => { const result = await work; seen.push(result.text); return result; };
   try {
-    await record(h.admin("PUT", "/token", { token: testToken }));
-    await record(h.admin("POST", "/database", { databaseUrl: databaseId }));
-    await record(h.admin("POST", "/connection", { databaseUrl: databaseId, dataSourceId }));
+    // A 1.1 installation, so the token passes through the plugin's table once, on its way to Core.
+    await h.asVersion11();
     await record(h.admin("GET", "/status"));
+    await record(h.admin("POST", "/verify", {}));
     const key = await h.pair();
     await h.runJob();
     await record(h.call("GET", "/public/part-requests/options", { key }));
@@ -142,17 +161,17 @@ test("the token never appears in a response, a log line, the database, or an err
     stub.on(/^POST \/pages$/, () => { throw new Error(`network failure ${testToken}`); });
     await record(send(key, uuid()));
     stub.on(/^GET \/data_sources/, () => notionResponse({ message: testToken }, 401));
-    await record(h.admin("POST", "/connection", { databaseUrl: databaseId, dataSourceId }));
+    await record(h.admin("POST", "/verify", {}));
     await record(h.call("GET", "/admin/part-requests/requests"));
     await record(h.call("GET", "/admin/part-requests/devices"));
-    await h.admin("PUT", "/token", { token: "bad token with spaces" });
     await h.runJob();
   } finally { Object.assign(console, saved); }
   assert.ok(seen.length >= 10);
   for (const text of [...seen, ...lines]) { assert.ok(!text.includes(testToken), text.slice(0, 200)); assert.ok(!text.includes("ciphertext"), text.slice(0, 200)); }
-  const stored = JSON.stringify(h.test.sqlite.prepare("SELECT * FROM part_requests_notion").all()) + JSON.stringify(h.test.rows("SELECT * FROM part_requests_submissions")) + JSON.stringify(h.test.rows("SELECT * FROM part_requests_recipient_refresh"));
+  const stored = JSON.stringify(h.test.sqlite.prepare("SELECT * FROM part_requests_notion").all()) + JSON.stringify(h.test.rows("SELECT * FROM part_requests_submissions")) + JSON.stringify(h.test.rows("SELECT * FROM part_requests_recipient_refresh")) + JSON.stringify(h.test.rows("SELECT * FROM audit_log"));
   assert.ok(!stored.includes(testToken));
-  assert.ok(stub.calls.some((call) => call.headers.Authorization === `Bearer ${testToken}`), "it does reach Notion, in the header");
+  assert.equal(h.test.rows("SELECT * FROM part_requests_notion WHERE ciphertext IS NOT NULL OR iv IS NOT NULL").length, 0, "the 1.1 copy is gone");
+  assert.ok(stub.calls.some((call) => call.headers.Authorization === `Bearer ${testToken}`), "it does reach Notion, in the header Core sets");
 });
 
 // ---- Device API
@@ -363,7 +382,7 @@ test("duplicate IDs racing in parallel create one page, and the others do not ca
   const id = uuid();
   let release!: () => void;
   const held = new Promise<void>((resolve) => { release = resolve; });
-  stub.on(/^POST \/pages$/, async () => { await held; return notionResponse({ url: "https://www.notion.so/one" }); });
+  stub.on(/^POST \/pages$/, async () => { await held; return notionResponse({ object: "page", id: crypto.randomUUID(), url: "https://www.notion.so/one" }); });
   const racing = Array.from({ length: 12 }, () => send(key, id));
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(pageCalls(), 1);
@@ -382,7 +401,7 @@ test("duplicate IDs racing in parallel create one page, and the others do not ca
 test("the ID is recorded before Notion is called, and if recording fails Notion is not called", async () => {
   const key = await ready();
   const id = uuid();
-  stub.on(/^POST \/pages$/, () => { assert.equal(row(id).state, "pending"); return notionResponse({ url: "https://www.notion.so/one" }); });
+  stub.on(/^POST \/pages$/, () => { assert.equal(row(id).state, "pending"); return notionResponse({ object: "page", id: crypto.randomUUID(), url: "https://www.notion.so/one" }); });
   assert.equal((await send(key, id)).status, 201);
   h.state.failing = /INSERT INTO part_requests_submissions/;
   await assert.rejects(send(key, uuid()), /D1_ERROR/);
@@ -392,7 +411,7 @@ test("the ID is recorded before Notion is called, and if recording fails Notion 
 
 test("uncertain results are recorded, returned on repeats, and never sent again", async () => {
   const key = await ready();
-  for (const [label, answer] of [["5xx", () => notionResponse({}, 500)], ["409", () => notionResponse({}, 409)], ["timeout", () => { throw new DOMException("timed out", "TimeoutError"); }], ["unreadable", () => new Response("{bad")], ["bad link", () => notionResponse({ url: "https://notion.so.evil.example.test/x" })]] as const) {
+  for (const [label, answer] of [["5xx", () => notionResponse({}, 500)], ["409", () => notionResponse({}, 409)], ["timeout", () => { throw new DOMException("timed out", "TimeoutError"); }], ["unreadable", () => new Response("{bad")], ["bad link", () => notionResponse({ object: "page", id: crypto.randomUUID(), url: "https://notion.so.evil.example.test/x" })]] as const) {
     stub = (stub.restore(), stubNotion());
     stub.on(/^POST \/pages$/, answer);
     const id = uuid();
@@ -418,6 +437,13 @@ test("a certain failure is recorded as failed, repeats return it, and a new ID c
   assert.equal((await send(key, id)).body.state, "failed");
   assert.equal(pageCalls(), 1);
   stub = (stub.restore(), stubNotion());
+  // Core holds every module's Notion calls for the 7 seconds Notion named, so a new ID fails at once without a call.
+  const held = await send(key, uuid());
+  assert.equal(held.body.state, "failed");
+  assert.equal(held.body.code, "notion_429");
+  assert.ok(held.body.retryAfterSeconds >= 1 && held.body.retryAfterSeconds <= 7);
+  assert.equal(pageCalls(), 0);
+  h.core.state.pausedUntilMs = 0; // the wait is over
   assert.equal((await send(key, uuid())).status, 201);
 });
 
@@ -501,16 +527,24 @@ test("removing a member from the roster keeps their log entries, by name", async
   assert.equal(h.test.rows("SELECT * FROM part_requests_devices").length, 0);
 });
 
-test("a connection that is missing, replaced or out of step stops requests with a clear 503, but recorded results still answer", async () => {
+test("a connection that is missing, rebound or out of step stops requests with a clear 503, but recorded results still answer", async () => {
   const key = await ready();
   const id = uuid();
   await send(key, id);
-  await h.admin("PUT", "/token", { token: testToken });
+  // Core's binding now points at another data source, whose layout Part Requests has not checked.
+  h.core.bind({ databaseId, dataSourceId: otherDataSourceId, name: "Archive" });
   const unverified = await send(key, uuid());
   assert.equal(unverified.status, 503);
   assert.equal(unverified.body.code, "notion_not_connected");
   assert.equal((await send(key, id)).body.state, "created");
   assert.equal((await h.call("GET", "/public/part-requests/options", { key })).body.code, "notion_not_connected");
+  assert.equal((await h.admin("GET", "/status")).body.problem, "not_verified");
+  for (const change of [() => { h.core.state.connection = null; }, () => { h.core.state.bindings.clear(); }]) {
+    await h.connect();
+    change();
+    assert.equal((await send(key, uuid())).body.code, "notion_not_connected");
+    assert.equal(pageCalls(), 1, "no Notion call");
+  }
   await h.connect();
   stub.calls.length = 0;
   delete stub.source.properties.Qty;
@@ -520,18 +554,50 @@ test("a connection that is missing, replaced or out of step stops requests with 
   assert.equal(pageCalls(), 0);
   assert.match((await h.admin("GET", "/status")).body.schemaError, /Qty/);
   stub.source = dataSource();
-  await h.admin("POST", "/connection", { databaseUrl: databaseId, dataSourceId });
+  await h.admin("POST", "/verify", {});
   assert.equal((await send(key, uuid())).status, 201);
 });
 
-test("after a restore (no connection row, setup still marked done) requests stop and the Admin can reconnect", async () => {
+test("after a restore (no plugin row, setup still marked done) requests stop until the Admin verifies again", async () => {
   const key = await ready();
+  // Core's connection and binding come back with Core's part of the backup; the plugin's checked layout does not.
   h.test.run("DELETE FROM part_requests_notion");
   assert.equal((await send(key, uuid())).body.code, "notion_not_connected");
-  assert.equal((await h.admin("POST", "/connection", { databaseUrl: databaseId })).body.code, "notion_not_connected");
+  assert.equal((await h.admin("GET", "/status")).body.problem, "not_verified");
   assert.equal(await api.setup.stepValid(h.db, "notion-connection"), false);
-  await h.connect();
+  assert.equal((await h.admin("POST", "/verify", {})).status, 200);
   assert.equal((await send(key, uuid())).status, 201);
+});
+
+test("Core holding deliveries (an Admin's Stop or a restore) stops a request before anything is recorded, and the same ID works later", async () => {
+  const key = await ready();
+  h.core.state.deliveryPausedUntil = Date.now() + 60_000;
+  const id = uuid();
+  const held = await send(key, id);
+  assert.equal(held.status, 503);
+  assert.equal(held.body.code, "delivery_paused");
+  assert.equal(held.headers.get("retry-after"), "60");
+  assert.equal(row(id), undefined, "nothing recorded");
+  assert.equal(pageCalls(), 0);
+  // Reads still work while deliveries are held.
+  assert.equal((await h.call("GET", "/public/part-requests/options", { key })).status, 200);
+  h.core.state.deliveryPausedUntil = null;
+  assert.equal((await send(key, id)).status, 201);
+});
+
+test("a write Core refuses after the check (deliveries paused in between) is failed, not uncertain, since nothing was sent", async () => {
+  const key = await ready();
+  const realService = h.core.service;
+  // ready() passes, then Core refuses the create itself, as it would if deliveries were paused between the two.
+  h.core.service = (cost) => { const service = realService(cost); return { ...service, ready: async () => true }; };
+  h.core.state.deliveryPausedUntil = Date.now() + 60_000;
+  const id = uuid();
+  const result = await send(key, id);
+  assert.equal(result.status, 502);
+  assert.equal(result.body.state, "failed");
+  assert.equal(result.body.code, "notion_not_sent");
+  assert.equal(row(id).state, "failed");
+  assert.equal(pageCalls(), 0);
 });
 
 // ---- Repeat warning
@@ -682,7 +748,7 @@ test("the job is cheap when it is not due, because every module write pokes it",
   await h.runJob();
   stub.calls.length = 0;
   h.state.queries = 0;
-  assert.deepEqual(await api.jobs["part-requests.recipients"]({ db: h.db, services: { credentials: h.credentials }, scheduler: { steps: true } }), { skipped: "not due" });
+  assert.deepEqual(await api.jobs["part-requests.recipients"]({ db: h.db, services: h.services(), scheduler: { steps: true } }), { skipped: "not due" });
   assert.equal(stub.calls.length, 0);
   assert.equal(h.state.queries, 1);
   assert.equal((await h.call("POST", "/admin/part-requests/recipients/refresh", { origin: dashboard })).status, 202);
@@ -690,22 +756,42 @@ test("the job is cheap when it is not due, because every module write pokes it",
   assert.ok(stub.calls.length >= 4, "an Admin can ask for a refresh");
 });
 
-test("the job stays within the per-slice query budget", async () => {
-  await h.connect();
-  let most = 0;
+// Core's scheduler limits (apps/api/src/scheduler-budget.ts): one Durable Object slice may spend 40 subrequests, at most
+// 30 of them D1 queries and 12 provider requests, with 2 kept for its closing write. The cron fallback's pass has 46 in all,
+// shared by every due job. Each Notion request costs Core one provider request and one D1 read; Core reads its connection
+// once per invocation; and Core caps an invocation at 8 Notion requests.
+const sliceLimits = { total: 38, d1: 30, external: 12 };
+const cronPassTotal = 44;
+
+test("the job stays within a scheduler slice's budget, Core's Notion costs included, also on the run that moves a 1.1 token", async () => {
+  await h.asVersion11();
+  const slices: { d1: number; external: number; notion: number }[] = [];
   for (let run = 0; run < 20; run++) {
     h.state.queries = 0;
-    const outcome = await api.jobs["part-requests.recipients"]({ db: h.db, services: { credentials: h.credentials }, scheduler: { steps: true } }) as { more?: boolean };
-    most = Math.max(most, h.state.queries);
+    const outcome = await api.jobs["part-requests.recipients"]({ db: h.db, services: h.services(), scheduler: { steps: true } }) as { more?: boolean };
+    slices.push({ d1: h.state.queries + h.coreCost.last.d1, external: h.coreCost.last.external, notion: h.coreCost.last.notion });
     if (!outcome.more) break;
   }
-  assert.ok(most <= 4, `a slice used ${most} queries`);
+  assert.equal(h.core.state.imports[0]?.outcome, "imported");
+  for (const slice of slices) assert.ok(slice.d1 <= sliceLimits.d1 && slice.external <= sliceLimits.external && slice.d1 + slice.external <= sliceLimits.total, JSON.stringify(slice));
+  // The first slice moves the token (Core checks it and the data source: two requests) and reads the layout.
+  assert.deepEqual(slices[0], { d1: 12, external: 3, notion: 3 });
+  // Every later slice sends one Notion request at most and stays small.
+  for (const slice of slices.slice(1)) assert.ok(slice.notion <= 1 && slice.d1 + slice.external <= 10, JSON.stringify(slice));
 });
 
-test("the job under Core's cron fallback does several steps per run and finishes over several runs", async () => {
-  await h.connect();
-  stub.calls.length = 0;
-  const outcomes = await h.runJob(false);
+test("the job under Core's cron fallback stays within the pass and Core's 8 Notion requests, also on the run that moves a 1.1 token", async () => {
+  await h.asVersion11();
+  const outcomes = [];
+  for (let run = 0; run < 20; run++) {
+    h.state.queries = 0;
+    const outcome = await api.jobs["part-requests.recipients"]({ db: h.db, services: h.services(), scheduler: { steps: false } }) as { more?: boolean };
+    outcomes.push(outcome);
+    const total = h.state.queries + h.coreCost.last.d1 + h.coreCost.last.external;
+    assert.ok(total <= cronPassTotal, `run ${run} used ${total} of the pass`);
+    assert.ok(h.coreCost.last.notion <= 8, `run ${run} sent ${h.coreCost.last.notion} Notion requests`);
+    if (!outcome.more) break;
+  }
   assert.deepEqual(outcomes.at(-1), { done: true });
   assert.equal(h.test.rows("SELECT * FROM part_requests_recipients").length, 3);
 });
@@ -721,7 +807,7 @@ test("a job failure records only a code, waits rather than repeating, and keeps 
   assert.equal((await h.admin("GET", "/status")).body.refresh.lastError, "notion_429");
   assert.equal(h.test.rows("SELECT * FROM part_requests_recipients").length, 3);
   stub.calls.length = 0;
-  assert.deepEqual(await api.jobs["part-requests.recipients"]({ db: h.db, services: { credentials: h.credentials }, scheduler: { steps: true } }), { skipped: "not due" });
+  assert.deepEqual(await api.jobs["part-requests.recipients"]({ db: h.db, services: h.services(), scheduler: { steps: true } }), { skipped: "not due" });
   assert.equal(stub.calls.length, 0);
 });
 
@@ -735,7 +821,7 @@ test("a failed name lookup keeps the person, shown as unnamed, and is not repeat
 });
 
 test("the job does nothing until connected, and prunes old counters and people after a run", async () => {
-  assert.deepEqual(await api.jobs["part-requests.recipients"]({ db: h.db, services: { credentials: h.credentials } }), { skipped: "not connected" });
+  assert.deepEqual(await api.jobs["part-requests.recipients"]({ db: h.db, services: h.services() }), { skipped: "not connected" });
   assert.equal(stub.calls.length, 0);
   await h.connect();
   const old = Date.now() - 100 * 24 * 60 * 60_000;
@@ -748,93 +834,194 @@ test("the job does nothing until connected, and prunes old counters and people a
   assert.equal(h.test.rows("SELECT * FROM part_requests_recipients WHERE notion_user_id='gone'").length, 0);
 });
 
-// ---- The setup page's Verify button
+// ---- Moving a 1.1 token into Core
 
 const link = `https://app.notion.com/p/${databaseId.replaceAll("-", "")}`;
 const notionRow = () => h.test.rows<any>("SELECT * FROM part_requests_notion")[0];
+const movedAudit = () => h.test.rows<{ metadata_json: string; actor_user_id: string | null }>("SELECT metadata_json,actor_user_id FROM audit_log WHERE action='part_requests.token_moved_to_core'");
 
-test("verify: one call saves the token and the connection together, and names the data source", async () => {
-  const done = await h.admin("POST", "/verify", { token: testToken, databaseUrl: link });
+test("imported: the first request hands the 1.1 token to Core, which keeps the ordering database, and requests carry on untouched", async () => {
+  await h.asVersion11();
+  const key = await h.pair();
+  stub.calls.length = 0;
+  const created = await send(key, uuid());
+  assert.equal(created.status, 201, created.text);
+  assert.deepEqual(h.core.state.imports, [{ outcome: "imported", bindings: ["orders"] }]);
+  assert.equal(h.core.state.connection?.token, testToken, "Core holds the same token");
+  assert.deepEqual(h.core.state.bindings.get("orders"), { databaseId, dataSourceId, name: "Ordering" });
+  // Core checked the token and that the data source belongs to the database, then the request went out.
+  assert.deepEqual(stub.calls.map((call) => `${call.method} ${call.url.replace("https://api.notion.com/v1", "")}`), ["GET /users/me", `GET /data_sources/${dataSourceId}`, "POST /pages"]);
+  const row = notionRow();
+  assert.equal(row.ciphertext, null, "the plugin's copy is cleared at once");
+  assert.equal(row.iv, null);
+  assert.equal(row.schema_json !== null && row.verified_ms !== null, true, "the checked layout stays, so nothing needs verifying again");
+  assert.deepEqual(movedAudit().map((entry) => [JSON.parse(entry.metadata_json).outcome, entry.actor_user_id]), [["imported", null]]);
+  stub.calls.length = 0;
+  assert.equal((await send(key, uuid())).status, 201);
+  assert.equal(h.core.state.imports.length, 1, "only once");
+  assert.equal((await h.admin("GET", "/status")).body.problem, null);
+});
+
+test("imported: the job, Carts, options and the setup page each move it too, whichever comes first", async () => {
+  for (const first of ["job", "orders", "options", "status"] as const) {
+    stub.restore(); stub = stubNotion(); h = createHarness(api);
+    await h.asVersion11();
+    const key = await h.pair();
+    if (first === "job") await h.runJob();
+    else if (first === "orders") assert.ok((await h.call("GET", "/public/part-requests/orders", { key })).status < 300, first);
+    else if (first === "options") assert.equal((await h.call("GET", "/public/part-requests/options", { key })).status, 200, first);
+    else assert.equal((await h.admin("GET", "/status")).body.problem, null, first);
+    assert.deepEqual(h.core.state.imports.map((entry) => entry.outcome), ["imported"], first);
+    assert.equal(notionRow().ciphertext, null, first);
+  }
+});
+
+test("kept-existing: Core's own connection wins, the 1.1 copy is cleared, and the Admin binds the ordering database once", async () => {
+  await h.asVersion11("ntn_TESTtheOLDpluginTOKENstillWORKS0000000000000000");
+  await h.core.connect(); // An Admin already saved a token in Core, and chose no database for Part Requests.
+  const key = await h.pair();
+  stub.calls.length = 0;
+  const refused = await send(key, uuid());
+  assert.equal(refused.status, 503);
+  assert.equal(refused.body.code, "notion_not_connected");
+  assert.deepEqual(h.core.state.imports.map((entry) => entry.outcome), ["kept-existing"]);
+  assert.equal(h.core.state.connection?.token, testToken, "Core's token is not replaced");
+  assert.equal(notionRow().ciphertext, null);
+  assert.equal(stub.calls.length, 0, "Core made no Notion request, and nor did the plugin");
+  const status = await h.admin("GET", "/status");
+  assert.equal(status.body.problem, "orders_unbound");
+  assert.equal(status.body.binding, null);
+  assert.equal(status.body.databaseId, databaseId, "the page can offer the database 1.1 used");
+  assert.equal(status.body.dataSourceId, dataSourceId);
+  assert.equal(h.core.state.imports.length, 1, "not tried again");
+  // The page's "Use the previous ordering database" asks Core to bind it; Core checks its own token can read it.
+  h.core.bind({ databaseId, dataSourceId, name: "Ordering" });
+  assert.equal((await send(key, uuid())).status, 201, "the same data source needs no new check");
+});
+
+test("kept-existing: when Core already has the same database bound, nothing at all changes for students", async () => {
+  await h.asVersion11();
+  await h.core.connect();
+  h.core.bind({ databaseId, dataSourceId, name: "Ordering" });
+  const key = await h.pair();
+  assert.equal((await send(key, uuid())).status, 201);
+  assert.deepEqual(h.core.state.imports.map((entry) => entry.outcome), ["kept-existing"]);
+  assert.equal(notionRow().ciphertext, null);
+});
+
+test("unreadable: a copy nobody can decrypt, or a token Notion refuses, is cleared, and the Admin saves a token in Core", async () => {
+  await h.asVersion11();
+  h.test.run("UPDATE part_requests_notion SET ciphertext='AAAA',iv='BBBB'");
+  const key = await h.pair();
+  assert.equal((await send(key, uuid())).body.code, "notion_not_connected");
+  assert.deepEqual(h.core.state.imports.map((entry) => entry.outcome), ["unreadable"]);
+  assert.equal(notionRow().ciphertext, null);
+  const status = await h.admin("GET", "/status");
+  assert.equal(status.body.problem, "notion_not_configured");
+  assert.match(connectionProblem(status.body)!, /Settings > Integrations > Notion/);
+
+  stub.restore(); stub = stubNotion(); h = createHarness(api);
+  await h.asVersion11("ntn_TESTaTOKENnotionNOlongerACCEPTS000000000000000");
+  stub.calls.length = 0;
+  assert.equal((await h.admin("GET", "/status")).body.problem, "notion_not_configured");
+  assert.deepEqual(h.core.state.imports.map((entry) => entry.outcome), ["unreadable"]);
+  assert.deepEqual(stub.calls.map((call) => call.url), ["https://api.notion.com/v1/users/me"], "Core checked it once and kept nothing");
+  assert.equal(h.core.state.connection, null);
+  assert.equal(notionRow().ciphertext, null);
+});
+
+test("imported without the database: a data source Notion does not confirm is left for the Admin to choose", async () => {
+  await h.asVersion11();
+  stub.on(/^GET \/data_sources\//, () => notionResponse({ object: "error", status: 404 }, 404));
+  assert.equal((await h.admin("GET", "/status")).body.problem, "orders_unbound");
+  assert.deepEqual(h.core.state.imports, [{ outcome: "imported", bindings: [] }]);
+  assert.equal(h.core.state.connection?.token, testToken);
+  assert.equal(notionRow().ciphertext, null);
+});
+
+test("no 1.1 token: nothing is imported on any path", async () => {
+  const key = await ready();
+  await send(key, uuid());
+  await h.call("GET", "/public/part-requests/orders", { key });
+  await h.call("GET", "/public/part-requests/options", { key });
+  await h.admin("GET", "/status");
+  await h.runJob();
+  assert.deepEqual(h.core.state.imports, []);
+  assert.equal(movedAudit().length, 0);
+});
+
+test("a failed import keeps the copy and tries again next time; without encryption it waits and says so", async () => {
+  await h.asVersion11();
+  h.core.state.importFails = true;
+  const key = await h.pair();
+  assert.equal((await send(key, uuid())).body.code, "notion_not_connected");
+  assert.notEqual(notionRow().ciphertext, null, "kept, since nothing changed in Core");
+  h.core.state.importFails = false;
+  assert.equal((await send(key, uuid())).status, 201);
+  assert.equal(notionRow().ciphertext, null);
+
+  stub.restore(); stub = stubNotion(); h = createHarness(api);
+  await h.asVersion11();
+  const locked = createHarness(api, { credentials: testCredentials(false) });
+  // The same database, read with encryption unavailable: nothing is attempted, and the page says the copy is waiting.
+  locked.test.run("DELETE FROM part_requests_notion");
+  const row = notionRow();
+  locked.test.run("INSERT INTO part_requests_notion(installation_id,ciphertext,iv,address_salt,database_id,data_source_id,schema_json,verified_ms,updated_ms) VALUES ('primary',?,?,?,?,?,?,?,?)", row.ciphertext, row.iv, row.address_salt, row.database_id, row.data_source_id, row.schema_json, row.verified_ms, row.updated_ms);
+  const waiting = await locked.admin("GET", "/status");
+  assert.equal(waiting.body.legacyTokenSaved, true);
+  assert.equal(waiting.body.problem, "notion_not_configured");
+  assert.deepEqual(locked.core.state.imports, []);
+});
+
+test("two requests moving the token at once: Core keeps one, and one audit entry is written", async () => {
+  await h.asVersion11();
+  const key = await h.pair();
+  const results = await Promise.all([send(key, uuid()), send(key, uuid())]);
+  assert.deepEqual(h.core.state.imports.map((entry) => entry.outcome).sort(), ["imported", "kept-existing"]);
+  assert.equal(movedAudit().length, 1);
+  assert.equal(notionRow().ciphertext, null);
+  assert.ok(results.some((result) => result.status === 201));
+});
+
+test("verify: the Admin page's check saves the layout of Core's bound database, and asks Core again only for that read", async () => {
+  await h.core.connect();
+  h.core.bind({ databaseId, dataSourceId: otherDataSourceId, name: "Archive" });
+  const done = await h.admin("POST", "/verify", {});
   assert.equal(done.status, 200, done.text);
-  assert.equal(done.body.tokenSaved, true);
-  assert.equal(done.body.problem, null);
-  assert.equal(done.body.siteAddress, dashboard);
-  assert.equal(done.body.dataSourceName, "Ordering");
-  assert.equal((await h.admin("GET", "/status")).body.dataSourceName, "Ordering");
-  assert.equal(await api.setup.stepValid(h.db, "notion-connection"), true);
-  assert.ok(!done.text.includes(testToken));
-  assert.ok(!JSON.stringify(notionRow()).includes(testToken), "only ciphertext is stored");
+  assert.equal(done.body.dataSourceName, "Archive");
+  assert.equal(done.body.dataSourceId, otherDataSourceId);
+  assert.equal(done.body.databaseId, databaseId);
+  assert.equal(notionRow().ciphertext, null);
   const actions = h.test.rows<{ action: string }>("SELECT action FROM audit_log").map((row) => row.action);
-  assert.ok(actions.includes("part_requests.token_saved") && actions.includes("part_requests.connection_verified"));
+  assert.deepEqual(actions, ["part_requests.connection_verified"]);
 });
 
 test("verify: a failed check saves nothing, so nothing has to be undone", async () => {
-  stub.on(/\/users\/me$/, () => notionResponse({ code: "unauthorized" }, 401));
-  const rejected = await h.admin("POST", "/verify", { token: testToken, databaseUrl: link });
-  assert.equal(rejected.body.code, "notion_token_rejected");
-  assert.equal(notionRow(), undefined);
-  stub.restore(); stub = stubNotion();
-  stub.on(/\/databases\//, () => notionResponse({ code: "object_not_found" }, 404));
-  const unshared = await h.admin("POST", "/verify", { token: testToken, databaseUrl: link });
+  await h.core.connect();
+  h.core.bind({ databaseId, dataSourceId, name: "Ordering" });
+  stub.on(/^GET \/data_sources\//, () => notionResponse({ code: "object_not_found" }, 404));
+  const unshared = await h.admin("POST", "/verify", {});
   assert.equal(unshared.status, 422);
   assert.equal(unshared.body.code, "notion_404");
-  assert.match(unshared.body.error, /Add the connection to the database/);
+  assert.match(unshared.body.error, /Add Core's Notion connection to the database/);
   assert.equal(notionRow(), undefined);
   assert.equal(h.test.rows("SELECT * FROM part_requests_settings").length, 0);
-  stub.restore(); stub = stubNotion();
-  stub.source = dataSource();
-  delete stub.source.properties.SKU;
-  const mismatch = await h.admin("POST", "/verify", { token: testToken, databaseUrl: link });
-  assert.equal(mismatch.body.code, "schema_mismatch");
-  assert.match(mismatch.body.error, /"SKU" must exist with type rich_text/);
-  assert.equal(notionRow(), undefined);
   assert.equal(h.test.rows("SELECT * FROM audit_log").length, 0);
 });
 
-test("verify: several data sources save the proven token and ask for the choice, which then needs no token", async () => {
-  stub.dataSources = [{ id: dataSourceId, name: "Ordering" }, { id: otherDataSourceId, name: "Archive" }];
-  const asked = await h.admin("POST", "/verify", { token: testToken, databaseUrl: link });
-  assert.equal(asked.status, 409);
-  assert.equal(asked.body.code, "data_source_required");
-  assert.deepEqual(asked.body.dataSources.map((source: { name: string }) => source.name), ["Ordering", "Archive"]);
-  const waiting = await h.admin("GET", "/status");
-  assert.equal(waiting.body.tokenSaved, true);
-  assert.equal(waiting.body.problem, "notion_not_connected");
-  assert.equal(await api.setup.stepValid(h.db, "notion-connection"), false);
-  const chosen = await h.admin("POST", "/verify", { databaseUrl: link, dataSourceId: otherDataSourceId });
-  assert.equal(chosen.status, 200, chosen.text);
-  assert.equal(chosen.body.dataSourceName, "Archive");
-  assert.equal(chosen.body.dataSourceId, otherDataSourceId);
-});
-
-test("verify: bad input is refused, no token saved is a clear answer, and it is Admin only from the dashboard", async () => {
-  assert.equal((await h.admin("POST", "/verify", { token: "short", databaseUrl: link })).body.code, "invalid_token");
-  assert.equal((await h.admin("POST", "/verify", { token: testToken, databaseUrl: " " })).body.code, "invalid_link");
-  assert.equal((await h.admin("POST", "/verify", { token: testToken, databaseUrl: "https://notion.evil.example.test/p/x" })).body.code, "invalid_link");
-  assert.equal((await h.admin("POST", "/verify", { token: testToken, databaseUrl: link, extra: 1 })).status, 400);
-  assert.equal((await h.admin("POST", "/verify", { databaseUrl: link })).body.code, "notion_not_connected");
-  assert.equal(stub.calls.filter((call) => call.url.includes("/databases/")).length, 0, "no Notion call without a token");
-  const path = "/module-setup/part-requests/verify";
-  assert.equal((await h.call("POST", path, { role: "operator", origin: dashboard, body: { token: testToken, databaseUrl: link } })).status, 403);
-  assert.equal((await h.call("POST", path, { role: null, origin: dashboard, body: { token: testToken, databaseUrl: link } })).status, 401);
-  assert.equal((await h.call("POST", path, { origin: "https://elsewhere.example.test", body: { token: testToken, databaseUrl: link } })).status, 403);
-  assert.equal(notionRow(), undefined);
-  const unavailable = createHarness(api, { credentials: testCredentials(false) });
-  assert.equal((await unavailable.admin("POST", "/verify", { token: testToken, databaseUrl: link })).body.code, "credentials_unavailable");
-});
-
-test("status: replacing the token and removing it keep the data source's name and stop requests until verified again", async () => {
+test("status: Core's state, the binding and the last verified database are reported, never a token", async () => {
   await h.connect();
-  const replaced = await h.admin("PUT", "/token", { token: testToken });
-  assert.equal(replaced.body.problem, "notion_not_connected");
-  assert.equal(replaced.body.dataSourceName, "Ordering");
-  assert.equal(replaced.body.databaseId, databaseId);
-  const again = await h.admin("POST", "/verify", { databaseUrl: link, dataSourceId: replaced.body.dataSourceId });
-  assert.equal(again.body.problem, null);
-  const removed = await h.admin("DELETE", "/token");
-  assert.equal(removed.body.tokenSaved, false);
-  assert.equal(removed.body.problem, "notion_not_connected");
-  assert.equal(removed.body.databaseId, databaseId);
+  const status = await h.admin("GET", "/status");
+  assert.deepEqual(status.body.core, { saved: true, enabled: true, readable: true, connected: true, pausedUntilMs: null, capabilities: { read: "ok", insert: "unknown", update: "unknown", comment: "unknown", users: "unknown", email: "unknown" } });
+  assert.deepEqual(status.body.binding, { databaseId, dataSourceId, name: "Ordering" });
+  assert.equal(status.body.legacyTokenSaved, false);
+  assert.ok(!("tokenSaved" in status.body) && !("canSaveToken" in status.body));
+  assert.ok(!status.text.includes(testToken));
+  h.core.state.connection = null;
+  const removed = await h.admin("GET", "/status");
+  assert.equal(removed.body.problem, "notion_not_configured");
+  assert.equal(removed.body.databaseId, databaseId, "the database and its name stay for when Core is connected again");
+  assert.equal(removed.body.dataSourceName, "Ordering");
 });
 
 test("status: the refresh job keeps the data source's name, and a connection saved before names were kept reads as null", async () => {
@@ -963,7 +1150,6 @@ test("devices: exactly 500 on the roster raises the flag, because Core's project
 const statusOf = async () => (await h.admin("GET", "/status")).body;
 const notionAnswers = (match: RegExp, code: number) => stub.on(match, () => notionResponse({ code: "stub", message: `echo ${testToken}` }, code));
 const healthyNotion = () => { stub.restore(); stub = stubNotion(); };
-const databaseLinkBody = { databaseUrl: databaseId, dataSourceId };
 
 for (const [code, problem, stored] of [[401, "notion_token_rejected", "notion_401"], [403, "notion_insert_refused", "notion_insert_403"], [404, "notion_access_lost", "notion_404"]] as const) {
   test(`refused: a ${code} from a request shows ${problem}, keeps the student's answer, and the next call that works clears it`, async () => {
@@ -977,7 +1163,6 @@ for (const [code, problem, stored] of [[401, "notion_token_rejected", "notion_40
     const status = await statusOf();
     assert.equal(status.problem, problem);
     assert.ok(status.rejectedMs >= before);
-    assert.equal(status.tokenSaved, true);
     assert.equal(status.verifiedMs !== null, true, "the connection itself stays");
     assert.equal(h.test.rows<any>("SELECT rejection_code FROM part_requests_notion")[0].rejection_code, stored);
     healthyNotion();
@@ -1022,18 +1207,19 @@ test("insert content: a refresh run that reads the database does not flip it bac
   }
 });
 
-test("insert content: verifying with the saved token keeps it; a request that goes through or a new token clears it", async () => {
+test("insert content: verifying the same database keeps it; a request that goes through or verifying another database clears it", async () => {
   const key = await ready();
   insertRefused();
   await send(key, uuid());
-  assert.equal((await h.admin("POST", "/verify", databaseLinkBody)).body.problem, "notion_insert_refused", "verify only reads, so it cannot prove inserting works");
+  assert.equal((await h.admin("POST", "/verify", {})).body.problem, "notion_insert_refused", "verify only reads, so it cannot prove inserting works");
   healthyNotion();
   assert.equal((await send(key, uuid())).status, 201);
   assert.equal((await statusOf()).problem, null);
   insertRefused();
   await send(key, uuid());
   healthyNotion();
-  assert.equal((await h.admin("POST", "/verify", { ...databaseLinkBody, token: testToken })).body.problem, null, "a new token may be a different connection");
+  h.core.bind({ databaseId, dataSourceId: otherDataSourceId, name: "Archive" });
+  assert.equal((await h.admin("POST", "/verify", {})).body.problem, null, "another database may allow it");
 });
 
 test("insert content: a 401 still reads as a rejected token, and a read refusal still reads as lost access", async () => {
@@ -1077,29 +1263,26 @@ test("refused: a passing 500 neither sets it nor clears one already recorded, an
   assert.equal((await statusOf()).problem, "notion_token_rejected");
 });
 
-test("refused: a successful verify clears it, with the saved token or a new one, and so does removing the token", async () => {
+test("refused: a successful verify clears it, and Core's connection going away is reported ahead of it", async () => {
   const key = await ready();
   notionAnswers(/^POST \/pages$/, 401);
   await send(key, uuid());
   healthyNotion();
-  assert.equal((await h.admin("POST", "/verify", databaseLinkBody)).body.problem, null);
-  notionAnswers(/^POST \/pages$/, 403);
-  await send(key, uuid());
-  healthyNotion();
-  assert.equal((await h.admin("POST", "/verify", { ...databaseLinkBody, token: testToken })).body.problem, null);
+  const verified = await h.admin("POST", "/verify", {});
+  assert.equal(verified.body.problem, null);
+  assert.equal(verified.body.rejectedMs, null);
   notionAnswers(/^POST \/pages$/, 401);
   await send(key, uuid());
-  const removed = await h.admin("DELETE", "/token");
-  assert.equal(removed.body.problem, "notion_not_connected");
-  assert.equal(removed.body.rejectedMs, null);
+  h.core.state.connection = null;
+  assert.equal((await statusOf()).problem, "notion_not_configured");
 });
 
 test("refused: a failed verify changes nothing, and a problem that stops requests is reported ahead of it", async () => {
   const key = await ready();
   notionAnswers(/^POST \/pages$/, 401);
   await send(key, uuid());
-  notionAnswers(/^GET \/databases\//, 401);
-  assert.equal((await h.admin("POST", "/verify", databaseLinkBody)).status, 422);
+  notionAnswers(/^GET \/data_sources\//, 401);
+  assert.equal((await h.admin("POST", "/verify", {})).status, 422);
   assert.equal((await statusOf()).problem, "notion_token_rejected");
   h.test.run("UPDATE part_requests_notion SET schema_error='Changed'");
   assert.equal((await statusOf()).problem, "notion_schema_changed");
@@ -1240,11 +1423,12 @@ test("recipients: a 401 looking up one name is a rejected token, and that person
   assert.equal(checked(), 0);
 });
 
-test("refused: a slow call made with a replaced token cannot mark the new one", async () => {
+test("refused: a slow call made before the Admin verified another database cannot mark the new one", async () => {
   await ready();
   const { readConnection, recordRefusal } = await import("../src/connection.ts");
   const old = (await readConnection(h.db))!;
-  assert.equal((await h.admin("POST", "/verify", { ...databaseLinkBody, token: testToken })).status, 200);
+  h.core.bind({ databaseId, dataSourceId: otherDataSourceId, name: "Archive" });
+  assert.equal((await h.admin("POST", "/verify", {})).status, 200);
   await recordRefusal(h.db, old, "notion_401", Date.now());
   assert.equal((await statusOf()).problem, null);
 });
@@ -1276,77 +1460,6 @@ test("refused: the token stays out of every answer, the database and the logs, a
   assert.equal(await api.setup.stepValid(h.db, "notion-connection"), true, "a refusal must not lock the module");
 });
 
-// ---- Replacing a token, as the page does it: one POST /verify with the saved data source.
-const newToken = "ntn_TESTreplacementTokenNEVERreal0123456789ABCDEFGHIJ";
-const cipher = () => h.test.rows<any>("SELECT ciphertext,verified_ms,data_source_id FROM part_requests_notion")[0];
-const replace = () => h.admin("POST", "/verify", { token: newToken, databaseUrl: `https://app.notion.com/p/${databaseId.replaceAll("-", "")}`, dataSourceId });
-const acceptNewToken = () => { for (const match of [/^GET \/users\/me$/, /^GET \/databases\//, /^GET \/data_sources\//]) stub.on(match, (call) => call.headers.Authorization === `Bearer ${newToken}` ? fetchAsTestToken(call) : notionResponse({ code: "unauthorized" }, 401)); };
-const fetchAsTestToken = (call: { url: string }) => call.url.includes("/users/me") ? notionResponse({ object: "user", id: "b0000000-0000-4000-8000-000000000000", type: "bot", bot: {} })
-  : call.url.includes("/databases/") ? notionResponse({ object: "database", id: databaseId, data_sources: stub.dataSources }) : notionResponse({ ...stub.source, id: dataSourceId });
-
-test("replace: one call saves and verifies, with no moment when requests stay stopped, and the old token is gone", async () => {
-  await ready();
-  const before = cipher();
-  acceptNewToken();
-  const replaced = await replace();
-  assert.equal(replaced.status, 200, replaced.text);
-  assert.equal(replaced.body.problem, null);
-  assert.equal(replaced.body.dataSourceId, dataSourceId);
-  assert.notEqual(cipher().ciphertext, before.ciphertext);
-  assert.ok(cipher().verified_ms >= before.verified_ms);
-  assert.ok(!replaced.text.includes(newToken));
-  assert.equal(h.test.rows("SELECT 1 FROM audit_log WHERE action='part_requests.token_saved'").length, 2);
-});
-
-test("replace: each failure saves nothing, and the old token stays verified and working", async () => {
-  const key = await ready();
-  const before = cipher();
-  const unchanged = () => assert.deepEqual(cipher(), before);
-  // Rejected by Notion.
-  assert.equal((await replace()).body.code, "notion_token_rejected");
-  unchanged();
-  // Accepted, but it cannot reach the database.
-  stub.on(/^GET \/users\/me$/, () => notionResponse({ object: "user", id: "b", type: "bot", bot: {} }));
-  stub.on(/^GET \/databases\//, () => notionResponse({ code: "object_not_found" }, 404));
-  assert.equal((await replace()).body.code, "notion_404");
-  unchanged();
-  // Reaches it, but the layout no longer fits.
-  healthyNotion(); acceptNewToken();
-  delete stub.source.properties.SKU;
-  assert.equal((await replace()).body.code, "schema_mismatch");
-  unchanged();
-  // The saved data source has gone from the database: a choice is needed, and the old token still is not replaced.
-  healthyNotion(); acceptNewToken();
-  stub.dataSources = [{ id: otherDataSourceId, name: "Other" }, { id: "cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeeee", name: "Another" }];
-  assert.equal((await replace()).body.code, "data_source_required");
-  unchanged();
-  // Notion is down.
-  healthyNotion();
-  stub.on(/^GET \/users\/me$/, () => notionResponse({ message: "stub" }, 500));
-  assert.equal((await replace()).status, 502);
-  unchanged();
-  healthyNotion();
-  assert.equal((await send(key, uuid())).status, 201, "requests still work with the old token");
-});
-
-test("replace: first-time setup with several data sources still keeps the proven token and asks for the choice", async () => {
-  stub.dataSources = [{ id: dataSourceId, name: "Ordering" }, { id: otherDataSourceId, name: "Archive" }];
-  const refused = await h.admin("POST", "/verify", { token: testToken, databaseUrl: databaseId });
-  assert.equal(refused.body.code, "data_source_required");
-  assert.equal(h.test.rows<any>("SELECT ciphertext IS NOT NULL AS saved FROM part_requests_notion")[0].saved, 1);
-});
-
-test("replace: fixes a rejected token in the same step", async () => {
-  const key = await ready();
-  notionAnswers(/^POST \/pages$/, 401);
-  await send(key, uuid());
-  assert.equal((await statusOf()).problem, "notion_token_rejected");
-  healthyNotion(); acceptNewToken();
-  const replaced = await replace();
-  assert.equal(replaced.body.problem, null);
-  assert.equal(replaced.body.rejectedMs, null);
-});
-
 test("query counts: the routes stay small enough for Workers Free", async () => {
   await h.connect();
   await h.runJob();
@@ -1354,8 +1467,11 @@ test("query counts: the routes stay small enough for Workers Free", async () => 
   const id = uuid();
   const measure = async (work: () => Promise<{ status: number }>, status: number) => { h.state.queries = 0; assert.equal((await work()).status, status); return h.state.queries; };
   assert.equal(await measure(() => send(key, id, goodDraft({ recipient: guestPerson })), 201), 3, "create: reads, record, result");
+  assert.equal(h.coreCost.last.notion, 1, "create: one Notion request through Core");
+  assert.ok(h.coreCost.last.d1 <= 2, `create: Core read ${h.coreCost.last.d1} times`);
   assert.equal(await measure(() => send(key, id, goodDraft({ recipient: guestPerson })), 200), 1, "repeat: reads only");
   assert.equal(await measure(() => send(key, uuid(), goodDraft({ team: "team-unknown" })), 400), 1, "refused: reads only");
   assert.equal(await measure(() => h.call("GET", "/public/part-requests/options", { key }), 200), 2);
+  assert.deepEqual([h.coreCost.last.notion, h.coreCost.last.d1], [0, 1], "options: Core reads its connection once and calls nothing");
   assert.equal(await measure(() => h.call("POST", "/public/part-requests/check", { key, body: { url: goodDraft().url } }), 200), 3);
 });

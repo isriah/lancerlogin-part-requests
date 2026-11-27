@@ -32,7 +32,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v7
         with:
-          node-version: 24.21.0
+          node-version: 24.22.1
       - name: Require a complete release candidate (version, notes, changelog, release commit)
         run: node scripts/plugin-release.mjs check-tag "$RELEASE_TAG"
       - name: Require successful Verify for this exact commit on main

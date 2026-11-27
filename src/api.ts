@@ -28,7 +28,7 @@ async function publicRoute(context: ModuleRouteContext<unknown>): Promise<Respon
     const input = object(await context.json(1024));
     return json({ ok: true, memberName: device.memberName, pairedDevices: device.pairedDevices, echo: typeof input.echo === "string" ? input.echo.slice(0, 200) : null });
   }
-  const device: DeviceRequest = { db, authorization: context.request.headers.get("authorization"), credentials: context.services.credentials, now: Date.now() };
+  const device: DeviceRequest = { db, authorization: context.request.headers.get("authorization"), services: context.services, now: Date.now() };
   if (pathname === `${prefix}/options` && method === "GET") return readOptions(device);
   if (pathname === `${prefix}/devices/self/revoke` && method === "POST") return revokeSelf(device);
   if (pathname === `${prefix}/recipient` && method === "POST") return saveRecipient(device, await context.json(1024));
