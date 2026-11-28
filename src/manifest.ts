@@ -10,14 +10,13 @@ const manifest = {
   // Notion through Core's one connection (SDK 1.8.0). Core refuses anything not declared here. On `orders`: `retrieve` reads
   // the layout, `query` reads open orders, the people named on requests and stale requests, `pages.create` adds a request,
   // `comments.create` posts a stale-request reminder and `pages.update` sets its "Reminder sent" date (nothing else is ever
-  // updated). `people` is optional and read only: reminders look up each person's LancerLogin member ID there, and Chores is
-  // its only writer. Users are listed and read one at a time for the recipient list; their email addresses are not needed,
-  // so `email` is not declared.
+  // updated). There is no People binding: reminders find the member behind each Notion person through Core's people
+  // matching (SDK 1.10.0), which reads Core's own copy and makes no Notion request. Users are listed and read one at a time
+  // for the recipient list; their email addresses are not needed, so `email` is not declared.
   notion: {
     users: ["list", "retrieve"],
     bindings: [
       { id: "orders", label: "Ordering database", reason: "Part requests from the browser extension are added here, Carts and the recipient list read it, and stale-request reminders comment on requests and set their Reminder sent date.", required: true, kind: "data_source", operations: ["retrieve", "query", "pages.create", "comments.create", "pages.update"] },
-      { id: "people", label: "People database (reminders)", reason: "Optional. Stale-request reminders read it to find the LancerLogin member behind each Notion person, so Discord pings the right member. Part Requests never writes to it.", required: false, kind: "data_source", operations: ["retrieve", "query"] },
     ],
   },
   capabilities: [{ id: "part-requests.admin", label: "Part Requests administration (Admins only)", operator: true }],

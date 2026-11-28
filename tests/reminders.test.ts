@@ -1,5 +1,6 @@
 // Stale-request reminders end to end: the admin routes and the job, on the real migrations, with Core's `services.notion`
-// stubbed (core-notion-stub.ts, which sends real requests to the fetch-boundary Notion stub) and a fake Discord service.
+// stubbed (core-notion-stub.ts, which sends real requests to the fetch-boundary Notion stub), Core's people matching stubbed
+// (listNotionPeopleAccounts in module-sdk-stub.ts, over test tables) and a fake Discord service.
 // Every person, member and ID here is synthetic.
 import test, { afterEach, beforeEach } from "node:test";
 import assert from "node:assert/strict";
@@ -13,8 +14,6 @@ const { default: api } = await import("../src/api.ts") as { default: any };
 const reminders = await import("../src/reminders.ts");
 const remindersNotion = await import("../src/reminders-notion.ts");
 
-const peopleDb = "33333333-2222-4333-8444-555555555555";
-const peopleSource = "eeeeeeee-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 const thirdPerson = "c0000000-0000-4000-8000-00000000000d";
 const channel = "300000000000000001";
 const day = 86_400_000;
@@ -53,28 +52,11 @@ function page(row: Row) {
   };
 }
 
-type PeopleEntry = { accounts: string[]; memberKey: string; active: boolean };
-const peoplePage = (entry: PeopleEntry, index: number) => ({
-  object: "page", id: `f0000000-0000-4000-8000-${String(index).padStart(12, "0")}`, url: "https://www.notion.so/person",
-  parent: { type: "data_source_id", data_source_id: peopleSource },
-  properties: {
-    Name: { id: "title", type: "title", title: [{ plain_text: "Test Student Name" }] },
-    "Notion account": { id: "acc", type: "people", people: entry.accounts.map((id) => ({ object: "user", id })) },
-    "LancerLogin member ID": { id: "mid", type: "rich_text", rich_text: [{ plain_text: entry.memberKey }] },
-    Active: { id: "act", type: "checkbox", checkbox: entry.active },
-  },
-});
-const peopleSourceJson = (overrides: Record<string, unknown> = {}) => ({
-  object: "data_source", id: peopleSource, title: [{ plain_text: "People" }], parent: { type: "database_id", database_id: peopleDb },
-  properties: { "Notion account": { id: "acc", type: "people", people: {} }, "LancerLogin member ID": { id: "mid", type: "rich_text", rich_text: {} }, Active: { id: "act", type: "checkbox", checkbox: {} }, Name: { id: "title", type: "title", title: {} }, ...overrides },
-});
-
 type Answer = (call: Call) => Response | Promise<Response>;
-/** Notion for the ordering database and People, as state the test changes. */
+/** Notion for the ordering database, as state the test changes. There is no People database in Notion for the plugin any more. */
 function reminderNotion(stub: Stub) {
-  const state = { rows: [] as Row[], people: [] as PeopleEntry[], peopleSource: peopleSourceJson() as any, comment: undefined as Answer | undefined, patch: undefined as Answer | undefined, query: undefined as Answer | undefined, pageRead: undefined as Answer | undefined };
+  const state = { rows: [] as Row[], comment: undefined as Answer | undefined, patch: undefined as Answer | undefined, query: undefined as Answer | undefined, pageRead: undefined as Answer | undefined };
   stub.source = orderingWithReminders();
-  stub.on(new RegExp(`^GET /data_sources/${peopleSource}$`), () => notionResponse(state.peopleSource));
   stub.on(new RegExp(`^POST /data_sources/${dataSourceId}/query$`), (call) => {
     if (state.query) return state.query(call);
     const start = Number(call.body.start_cursor ?? 0); const size = call.body.page_size;
@@ -82,7 +64,6 @@ function reminderNotion(stub: Stub) {
     const more = start + size < state.rows.length;
     return notionResponse({ object: "list", results: rows.map(page), has_more: more, next_cursor: more ? String(start + size) : null });
   });
-  stub.on(new RegExp(`^POST /data_sources/${peopleSource}/query$`), () => notionResponse({ object: "list", results: state.people.map(peoplePage), has_more: false, next_cursor: null }));
   // Core's page-in-database check.
   stub.on(/^GET \/pages\//, (call) => {
     if (state.pageRead) return state.pageRead(call);
@@ -131,7 +112,7 @@ afterEach(() => { stub.restore(); });
 const admin = (method: string, path: string, body?: unknown) => h.call(method, `/admin/part-requests/reminders${path}`, { body, origin: "https://site.example.test" });
 const context = (steps = true) => ({ db: h.db, services: { ...h.services(), discord: discord.service }, scheduler: { steps } });
 const runJob = () => api.jobs["part-requests.reminders"](context());
-const settingsBody = (overrides: Record<string, unknown> = {}) => ({ enabled: true, weekdays: [1, 3, 5], runTime: "15:00", staleMinutes: 2880, cooldownMinutes: 2880, discordChannelId: channel, peopleKey: "external_id", ...overrides });
+const settingsBody = (overrides: Record<string, unknown> = {}) => ({ enabled: true, weekdays: [1, 3, 5], runTime: "15:00", staleMinutes: 2880, cooldownMinutes: 2880, discordChannelId: channel, ...overrides });
 
 async function setUp(overrides: Record<string, unknown> = {}) {
   const verified = await admin("POST", "/verify", {});
@@ -141,13 +122,21 @@ async function setUp(overrides: Record<string, unknown> = {}) {
   stub.calls.length = 0;
   return saved.body;
 }
-async function usePeople() {
-  h.core.bind({ databaseId: peopleDb, dataSourceId: peopleSource, name: "People" }, "people");
-  const people = await admin("POST", "/people/verify", {});
-  assert.equal(people.status, 200, people.text);
-  stub.calls.length = 0;
-  return people.body;
+type CoreRow = { notionUserId: string; memberId: string | null; matched: boolean; name?: string; externalId?: string };
+/** What Core's people matching answers: undefined while it has no verified People database, else these rows, in order. */
+function coreMatching(rows: CoreRow[] | undefined) {
+  h.test.run("DELETE FROM core_people_matching");
+  h.test.run("DELETE FROM core_people_accounts");
+  if (!rows) return;
+  h.test.run("INSERT INTO core_people_matching(installation_id,verified) VALUES ('primary',1)");
+  for (const row of rows) {
+    h.test.run("INSERT INTO core_people_accounts(installation_id,member_id,external_id,name,notion_user_id,matched) VALUES ('primary',?,?,?,?,?)",
+      row.memberId, row.externalId ?? "0000", row.name ?? "Test People Row", row.notionUserId, row.matched ? 1 : 0);
+  }
 }
+/** The only Notion requests a run may make: the ordering database's layout and rows, and its pages (Core's check, the comment, the mark). */
+const orderingOnly = (call: Call) => new RegExp(`^(GET /data_sources/${dataSourceId}|POST /data_sources/${dataSourceId}/query|GET /pages/[0-9a-f-]{36}|PATCH /pages/[0-9a-f-]{36}|POST /comments)$`)
+  .test(`${call.method} ${call.url.slice("https://api.notion.com/v1".length)}`);
 
 /** The job, one slice per call as the scheduler runs it, until it stops. */
 async function drain(limit = 400) {
@@ -199,7 +188,8 @@ test("off by default and while unchecked: the job skips with one read and no pro
   assert.deepEqual(await runJob(), { skipped: "disabled" });
   const view = await admin("GET", "");
   assert.equal(view.body.settings.enabled, false);
-  assert.equal(view.body.settings.peopleKey, "external_id", "the People column holds the member ID people type, by default");
+  assert.equal("peopleKey" in view.body.settings, false, "no People settings of the plugin's own");
+  assert.deepEqual(view.body.people, { setUp: false, matched: 0 }, "Core's people matching is not set up");
   assert.equal(view.body.core.ordersBound, true);
   const refused = await admin("PUT", "/settings", { revision: 0, ...settingsBody() });
   assert.equal(refused.status, 409);
@@ -357,94 +347,139 @@ test("nobody assigned is listed and skipped; no Discord ID and an ambiguous matc
   assert.equal(view.body.lastRun.counts.reminded, 2);
 });
 
-// ---- People
+// ---- Who to ping: Core's people matching
 
-test("People database: checked through Core's people binding, read only; match, inactive ignored, duplicates ambiguous, key switch", async () => {
+test("Core's people matching decides when it matches anyone: matched rows only, ambiguous accounts skipped, no Notion request for People", async () => {
   h.test.run("INSERT INTO members(id,installation_id,external_id,first_name,last_name,email,discord_user_id) VALUES ('m-c','primary','9003','Test Student','C','student.c@example.test','100000000000000003')");
   await setUp();
-  assert.equal((await admin("POST", "/people/verify", {})).body.code, "people_unbound");
-  const people = await usePeople();
-  assert.equal(people.people.current, true);
-  assert.equal(people.people.dataSourceName, "People");
-  notion.people = [
-    { accounts: [memberPerson], memberKey: "9002", active: true },
-    { accounts: [guestPerson], memberKey: "9001", active: false },
-    { accounts: [thirdPerson], memberKey: "9003", active: true },
-    { accounts: [crypto.randomUUID()], memberKey: "9003", active: true },
-  ];
+  coreMatching([
+    { notionUserId: memberPerson, memberId: "m-b", matched: true, externalId: "9002" },
+    { notionUserId: guestPerson, memberId: null, matched: false, externalId: "9001" },
+    { notionUserId: thirdPerson, memberId: "m-c", matched: true, externalId: "9003" },
+    { notionUserId: thirdPerson, memberId: "m-a", matched: true, externalId: "9001" },
+  ]);
+  const view = await admin("GET", "");
+  assert.deepEqual(view.body.people, { setUp: true, matched: 3 });
   notion.rows = [{ id: id(1), description: "Several", people: [memberPerson, guestPerson, thirdPerson], createdMs: old() }];
-  await sendNow(); await drain();
+  stub.calls.length = 0;
+  await sendNow();
+  const outcomes = await drain();
   const [item] = items();
-  assert.deepEqual(JSON.parse(item.mentions_json), [discordB], "memberPerson is Test Student B in People, whatever the default recipients say");
+  assert.deepEqual(JSON.parse(item.mentions_json), [discordB], "memberPerson is Test Student B in Core's matching, whatever the default recipients say");
   assert.deepEqual(JSON.parse(item.unpinged_json), [{ person: guestPerson, reason: "no_member" }, { person: thirdPerson, reason: "ambiguous" }]);
   assert.deepEqual(discord.calls[0]!.body.allowed_mentions.users, [discordB]);
   assert.equal(JSON.parse(runs()[0].mentions_json).source, "people");
-  const peopleQuery = calls(new RegExp(`^POST /data_sources/${peopleSource}/query$`))[0]!;
-  assert.deepEqual(peopleQuery.body.filter, { property: "act", checkbox: { equals: true } });
-  assert.equal(calls(new RegExp(`${peopleSource}|f0000000`)).filter((call) => call.method !== "GET" && !call.url.endsWith("/query")).length, 0, "nothing is ever written to People");
-  assert.ok(!runs()[0].config_json.includes("Test Student Name"), "People's names are never read or stored");
-
-  // The same rows keyed by the internal member ID, after switching the column.
-  const view = await admin("GET", "");
-  await admin("PUT", "/settings", { revision: view.body.settings.revision, ...settingsBody({ peopleKey: "id" }) });
-  notion.people = [{ accounts: [memberPerson], memberKey: "m-a", active: true }];
-  notion.rows = [{ id: id(2), description: "Keyed by id", people: [memberPerson], createdMs: old() }];
-  await sendNow(); await drain();
-  assert.deepEqual(JSON.parse(items().find((row) => row.page_id === id(2)).mentions_json), [discordA]);
+  // (d) The run reads People from Core's copy: no Notion request beyond the ordering database, and no People step.
+  assert.deepEqual(stub.calls.filter((call) => !orderingOnly(call)).map((call) => `${call.method} ${call.url}`), []);
+  assert.equal(calls(new RegExp(`^GET /data_sources/${dataSourceId}$`)).length, 1, "one layout read for the whole run");
+  assert.ok(!outcomes.some((outcome) => outcome?.step === "people"), JSON.stringify(outcomes));
+  assert.deepEqual(h.core.state.refusals, [], "nothing asked Core for a binding the manifest no longer declares");
+  const view2 = await admin("GET", "");
+  assert.deepEqual(view2.body.lastRun.pingSkipped[0].people.map((person: any) => person.reason), ["no_member", "ambiguous"]);
 });
 
-test("People with no active rows, or cleared in Core, falls back to default recipients", async () => {
+test("(a) Core's people matching not set up, or matching nobody, falls back to default recipients as before", async () => {
   await setUp();
-  await usePeople();
-  notion.people = [{ accounts: [memberPerson], memberKey: "9002", active: false }];
-  notion.rows = [{ id: id(1), description: "Fallback", people: [memberPerson], createdMs: old() }];
+  // Not set up: Core answers undefined.
+  coreMatching(undefined);
+  notion.rows = [{ id: id(1), description: "Not set up", people: [memberPerson], createdMs: old() }];
   await sendNow(); await drain();
-  assert.deepEqual(JSON.parse(items()[0].mentions_json), [discordA]);
+  assert.deepEqual(JSON.parse(items()[0].mentions_json), [discordA], "Test Student A chose memberPerson as their default recipient");
   assert.equal(JSON.parse(runs()[0].mentions_json).source, "fallback");
 
-  h.core.state.bindings.delete("people");
-  notion.rows = [{ id: id(2), description: "People cleared", people: [memberPerson], createdMs: old() }];
-  stub.calls.length = 0;
+  // Set up, but no row matched, including a row that says matched without a member: still the fallback.
+  coreMatching([
+    { notionUserId: memberPerson, memberId: "m-b", matched: false },
+    { notionUserId: guestPerson, memberId: null, matched: true },
+  ]);
+  assert.deepEqual((await admin("GET", "")).body.people, { setUp: true, matched: 0 });
+  notion.rows = [{ id: id(2), description: "Nobody matched", people: [memberPerson], createdMs: old() }];
   await sendNow(); await drain();
-  assert.equal(calls(new RegExp(peopleSource)).length, 0, "People is not read once Core no longer binds it");
   assert.deepEqual(JSON.parse(items().find((row) => row.page_id === id(2)).mentions_json), [discordA]);
-  assert.equal((await admin("GET", "")).body.people.current, false);
+  assert.equal(JSON.parse(runs().at(-1).mentions_json).source, "fallback");
+
+  // Preview agrees in both cases.
+  notion.rows = [{ id: id(3), description: "Preview fallback", people: [memberPerson], createdMs: old() }];
+  for (const answer of [undefined, [{ notionUserId: memberPerson, memberId: "m-b", matched: false }]]) {
+    coreMatching(answer);
+    const preview = await admin("POST", "/preview");
+    assert.equal(preview.body.source, "fallback");
+    assert.deepEqual(preview.body.requests.map((row: any) => [row.pings, row.people[0].ping]), [[1, true]]);
+  }
 });
 
-test("a People layout that no longer fits stops the run before anything is sent", async () => {
+test("(b) an unmatched row is never used to ping anyone, even with a member ID on it", async () => {
   await setUp();
-  await usePeople();
-  const { Active: _, ...rest } = peopleSourceJson().properties;
-  notion.peopleSource = { ...peopleSourceJson(), properties: rest };
-  notion.rows = [{ id: id(1), description: "People broken", people: [memberPerson], createdMs: old() }];
-  await sendNow();
-  assert.deepEqual((await drain()).at(-1), { failed: "people_schema" });
-  assert.equal(calls(/^POST \/comments$/).length, 0);
-  const view = await admin("GET", "");
-  assert.match(view.body.people.error, /Active/);
-  assert.equal(view.body.problem, "people_schema");
+  coreMatching([
+    // Core found this row's member ID but did not match it (say Active is off, or another row carries the same ID).
+    { notionUserId: memberPerson, memberId: "m-b", matched: false, externalId: "9002" },
+    { notionUserId: guestPerson, memberId: "m-a", matched: true, externalId: "9001" },
+  ]);
+  notion.rows = [{ id: id(1), description: "Unmatched", people: [memberPerson, guestPerson], createdMs: old() }];
+  await sendNow(); await drain();
+  const [item] = items();
+  assert.deepEqual(JSON.parse(item.mentions_json), [discordA], "only the matched row pings");
+  assert.deepEqual(JSON.parse(item.unpinged_json), [{ person: memberPerson, reason: "no_member" }], "not Test Student B from the unmatched row, nor A from the default recipients");
+  assert.deepEqual(discord.calls[0]!.body.allowed_mentions.users, [discordA]);
+  const preview = await admin("POST", "/preview");
+  assert.equal(preview.body.source, "people");
 });
 
-test("the resolver on its own: key column, inactive members and duplicates", () => {
+test("(c) a hostile name from Core's People rows is never shown, stored or sent to Notion or Discord", async () => {
+  const hostile = `<img src=x onerror="alert(1)"> @everyone <@${discordB}> **Test Hostile** https://evil.example.test`;
+  await setUp();
+  coreMatching([
+    { notionUserId: memberPerson, memberId: "m-a", matched: true, name: hostile, externalId: hostile },
+    { notionUserId: guestPerson, memberId: null, matched: false, name: hostile },
+  ]);
+  notion.rows = [{ id: id(1), description: "Hostile names", people: [memberPerson, guestPerson], createdMs: old() }];
+  const preview = await admin("POST", "/preview");
+  await sendNow();
+  const outcomes = await drain();
+  const view = await admin("GET", "");
+  assert.deepEqual(discord.calls[0]!.body.allowed_mentions.users, [discordA]);
+  const everything = JSON.stringify([
+    preview.body, view.body, outcomes, discord.calls, stub.calls.map((call) => call.body),
+    runs(), items(), h.test.rows("SELECT * FROM part_requests_reminder_settings"), h.test.rows("SELECT * FROM audit_log"),
+  ]);
+  for (const part of ["onerror", "<img", "@everyone", discordB, "Test Hostile", "evil.example"]) assert.ok(!everything.includes(part), `${part} never leaves Core's answer`);
+  // The Admin sees names only from the recipient list, as before.
+  assert.deepEqual(preview.body.requests[0].people.map((person: any) => person.name), ["Test Member", "Unknown person"]);
+});
+
+test("a run left in the People step by 1.4 goes back to the schema step and finishes without reading People", async () => {
+  await setUp();
+  notion.rows = [{ id: id(1), description: "Left by 1.4", people: [memberPerson], createdMs: old() }];
+  const settings = h.test.rows<any>("SELECT schema_json FROM part_requests_reminder_settings")[0];
+  const legacy = { staleMinutes: 2880, cooldownMinutes: 2880, channelId: channel, schema: JSON.parse(settings.schema_json), people: { schema: { dataSourceId: "eeeeeeee-bbbb-4ccc-8ddd-eeeeeeeeeeee" }, key: "external_id" } };
+  h.test.run("INSERT INTO part_requests_reminder_runs(installation_id,run_key,kind,state,config_json,mentions_json,people_json,cursor,pages,created_ms) VALUES ('primary','manual:1','manual','people',?,'{\"roster\":{},\"fallback\":{}}','[]','cursor',1,?)", JSON.stringify(legacy), Date.now());
+  await drain();
+  assert.equal(runs()[0].state, "done");
+  assert.equal(runs()[0].people_json, null);
+  assert.equal(JSON.parse(runs()[0].config_json).people, undefined, "the 1.4 People layout is dropped from the run");
+  assert.deepEqual(JSON.parse(items()[0].mentions_json), [discordA]);
+  assert.deepEqual(stub.calls.filter((call) => !orderingOnly(call)), []);
+});
+
+test("the resolver on its own: matched rows only, inactive members and duplicates", () => {
   const members = [
     { id: "m-a", memberId: "9001", discordUserId: discordA, active: 1 },
     { id: "m-b", memberId: "9002", discordUserId: null, active: 1 },
     { id: "m-x", memberId: "9009", discordUserId: discordB, active: 0 },
   ];
-  assert.equal(reminders.memberKey(members[0]!, "external_id"), "9001");
-  assert.equal(reminders.memberKey(members[0]!, "id"), "m-a");
-  const roster = reminders.rosterIndex(members, "external_id");
-  assert.deepEqual(roster, { "9001": discordA, "9002": "" });
-  const map = reminders.resolveByPeople([
-    { accounts: ["u1"], memberKey: "9001", active: true },
-    { accounts: ["u2"], memberKey: "9002", active: true },
-    { accounts: ["u3"], memberKey: "9009", active: true },
-    { accounts: ["u4"], memberKey: "9001", active: false },
-    { accounts: ["u5", "u6"], memberKey: "4242", active: true },
-    { accounts: ["u5"], memberKey: "4243", active: true },
-  ], roster);
-  assert.deepEqual(map, { u1: discordA, u2: "!no_discord_id", u3: "!no_member", u5: "!ambiguous", u6: "!no_member" });
-  assert.deepEqual(reminders.pings(["u1", "u2", "u7"], map), { ids: [discordA], unpinged: [{ person: "u2", reason: "no_discord_id" }, { person: "u7", reason: "no_member" }] });
+  const roster = reminders.rosterIndex(members);
+  assert.deepEqual(roster, { "m-a": discordA, "m-b": "" });
+  const row = (notionUserId: string, memberId: string | null, matched: boolean) => ({ notionUserId, memberId, matched, externalId: "0000", name: "Test People Row" });
+  const matched = reminders.matchedAccounts([
+    row("u1", "m-a", true), row("u2", "m-b", true), row("u3", "m-x", true), row("u4", "m-a", false), row("u5", null, true),
+    row("u6", "m-y", true), row("u6", "m-z", true), row("u7", "m-q", true), row("u8", "m-q", true),
+  ]);
+  assert.deepEqual(matched.map((item) => item.notionUserId), ["u1", "u2", "u3", "u6", "u6", "u7", "u8"], "unmatched rows and rows without a member are left out");
+  assert.ok(matched.every((item) => Object.keys(item).join() === "notionUserId,memberId"), "names and external IDs are dropped");
+  assert.deepEqual(reminders.matchedAccounts(undefined), []);
+  const map = reminders.resolveByPeople(matched, roster);
+  assert.deepEqual(map, { u1: discordA, u2: "!no_discord_id", u3: "!no_member", u6: "!ambiguous", u7: "!ambiguous", u8: "!ambiguous" });
+  assert.deepEqual(reminders.pings(["u1", "u2", "u4", "u9"], map), { ids: [discordA], unpinged: [{ person: "u2", reason: "no_discord_id" }, { person: "u4", reason: "no_member" }, { person: "u9", reason: "no_member" }] });
 });
 
 // ---- Failures, step by step
@@ -686,11 +721,10 @@ async function measured(steps: boolean) {
   return { outcome, d1, external, total: d1 + external, notion: stub.calls.length - notionBefore };
 }
 
-test("budget: every slice of a run, People included, fits the scheduler's slice limits and Core's Notion cap", async () => {
+test("budget: every slice of a run, with Core's people matching, fits the scheduler's slice limits and Core's Notion cap", async () => {
   h.test.run("INSERT INTO members(id,installation_id,external_id,first_name,last_name,email,discord_user_id) VALUES ('m-c','primary','9003','Test Student','C','student.c@example.test','100000000000000003')");
   await setUp();
-  await usePeople();
-  notion.people = [{ accounts: [memberPerson], memberKey: "9001", active: true }, { accounts: [guestPerson], memberKey: "9003", active: true }];
+  coreMatching([{ notionUserId: memberPerson, memberId: "m-a", matched: true }, { notionUserId: guestPerson, memberId: "m-c", matched: true }]);
   notion.rows = Array.from({ length: 25 }, (_, index) => ({ id: id(index + 1), description: `Row ${index}`, people: [memberPerson, guestPerson], createdMs: old() }));
   await sendNow();
   const worst = { d1: 0, external: 0, total: 0, notion: 0 };
@@ -702,6 +736,7 @@ test("budget: every slice of a run, People included, fits the scheduler's slice 
     if (!slice.outcome?.more) break;
   }
   assert.equal(items().filter((row) => row.mark_state === "set").length, 25);
+  assert.ok(items().every((row) => JSON.parse(row.mentions_json).length === 2), "both people pinged through Core's matching");
   assert.ok(worst.notion <= reminders.maximumSliceNotionCalls, `at most ${reminders.maximumSliceNotionCalls} Notion requests per slice: ${JSON.stringify(worst)}`);
   console.log(`reminder slice worst case: ${JSON.stringify(worst)}`);
 });
@@ -801,7 +836,8 @@ test("preview is a dry run: it lists requests, pings and skips, and writes nothi
   assert.equal(calls(/^POST \/comments$|^PATCH /).length, 0);
   assert.equal(discord.calls.length, 0);
   assert.equal(calls(new RegExp(`^POST /data_sources/${dataSourceId}/query$`))[0]!.body.page_size, 50);
-  assert.ok(h.coreCost.last.notion <= 3, "at most 3 Notion requests");
+  assert.equal(h.coreCost.last.notion, 2, "the layout and one page of requests; who to ping costs no Notion request");
+  assert.deepEqual(stub.calls.filter((call) => !orderingOnly(call)), []);
   assert.deepEqual(preview.body.requests.map((row: any) => [row.description, row.skipReason, row.pings]), [["Preview me", null, 1], ["Nobody", "no_people", 0]]);
   assert.deepEqual(preview.body.requests[0].people, [{ name: "Test Member", ping: true, reason: null }, { name: "Unknown person", ping: false, reason: "no_member" }]);
   assert.equal(preview.body.source, "fallback");

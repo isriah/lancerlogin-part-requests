@@ -40,10 +40,7 @@
 :where([data-module="part-requests"]) .pr-run-section > :where(h3,p) { margin: 0; }
 /* Several lines in one table cell, starting level with the other cells. */
 :where([data-module="part-requests"]) .pr-cell-lines { display: grid; gap: var(--space-1); color: var(--ui-text-muted); }
-/* The People card: Core's binding picker sits inside it without a second card, heading, description or pill. */
-:where([data-module="part-requests"]) .pr-people .notion-binding-card { padding: 0; border: 0; background: none; box-shadow: none; }
-:where([data-module="part-requests"]) .pr-people .notion-binding-card > h2,:where([data-module="part-requests"]) .pr-people .notion-binding-heading,:where([data-module="part-requests"]) .pr-people .notion-binding > .notion-note { display: none; }
-/* The comment name card: Core's field sits inside it the same way, keeping Core's hint about leaving the name blank. */
+/* The comment name card: Core's field sits inside it without a second card or heading, keeping Core's hint about leaving the name blank. */
 :where([data-module="part-requests"]) .pr-comment-name .notion-binding-card { padding: 0; border: 0; background: none; box-shadow: none; }
 :where([data-module="part-requests"]) .pr-comment-name .notion-binding-card > h2 { display: none; }
 

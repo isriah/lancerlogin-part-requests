@@ -1,16 +1,17 @@
 // The Reminders tab's routes under /admin/part-requests/reminders, Admin only and audited. Reminders always use the ordering
-// database, through Core's `orders` binding; People, when used, is Core's read-only `people` binding. Each layout is saved
-// only by a check here. Preview reads Notion and writes nothing anywhere.
-import { installationTimeZone, type D1Database } from "@lancerlogin/module-sdk/api";
+// database, through Core's `orders` binding, whose layout is saved only by a check here. Who to ping comes from Core's people
+// matching, set up in Core (Settings > Integrations > Notion), so nothing here chooses or checks a People database. Preview
+// reads Notion and writes nothing anywhere.
+import { installationTimeZone, listNotionPeopleAccounts, type D1Database } from "@lancerlogin/module-sdk/api";
 import { requireAdmin, verifyFailure, type AdminRouteContext } from "./connection.ts";
 import { json, object, refuse } from "./http.ts";
 import { AppError, ordersBinding, sameId } from "./notion.ts";
 import { installationId, type Database, type Statement } from "./pairing.ts";
-import { formatWeekdays, localAt, minuteMs, nextSlot, parseWeekdays, settingsProblems, type PeopleKey } from "./reminder-schedule.ts";
-import { RemindersNotion, peopleBinding, staleRow, type PeopleRow, type StaleRow } from "./reminders-notion.ts";
+import { formatWeekdays, localAt, minuteMs, nextSlot, parseWeekdays, settingsProblems } from "./reminder-schedule.ts";
+import { RemindersNotion, staleRow, type StaleRow } from "./reminders-notion.ts";
 import {
-  activeRunSql, cancelActiveRun, insertRun, isDue, numericCounts, peopleSchema, pings, readSettings, recentlyReminded, reminderSchema, resolveByPeople,
-  rosterIndex, rosterMentions, runConfig, runCountsSql, targetVerified, type SettingsRow,
+  activeRunSql, cancelActiveRun, insertRun, isDue, matchedAccounts, numericCounts, pings, readSettings, recentlyReminded, reminderSchema,
+  rosterMentions, runConfig, runCountsSql, targetVerified,
 } from "./reminders.ts";
 
 const audit = (db: Database, actor: string, action: string, now: number, onlyIfChanged = false): Statement =>
@@ -26,17 +27,20 @@ type ItemView = { pageUrl: string; description: string; unpinged: string; skipRe
 
 const localToday = (timeZone: string | null, now: number) => { try { return timeZone ? localAt(timeZone, now).date : new Date(now).toISOString().slice(0, 10); } catch { return new Date(now).toISOString().slice(0, 10); } };
 
-/** GET /reminders: settings, the checked layouts, Core's connection as it bears on reminders, any problem, the active run and the last finished run. */
+/**
+ * GET /reminders: settings, the checked layout, Core's connection as it bears on reminders, whether Core's people matching is
+ * set up and how many People rows it matches (a count, no names), any problem, the active run and the last finished run.
+ */
 async function view(context: AdminRouteContext, db: Database, now: number) {
   const notion = context.services.notion;
-  const [settings, active, last, timeZone, status, orders, people] = await Promise.all([
+  const [settings, active, last, timeZone, status, orders, accounts] = await Promise.all([
     readSettings(db), db.prepare(activeRunSql).bind(installationId).first<{ runKey: string; kind: string; state: string }>(),
     db.prepare(`SELECT run_key AS runKey,kind,state,error_code AS errorCode,truncated,created_ms AS createdMs,finished_ms AS finishedMs FROM part_requests_reminder_runs
       WHERE installation_id=? AND state IN ('done','failed') ORDER BY finished_ms DESC,created_ms DESC LIMIT 1`).bind(installationId).first<{ runKey: string; kind: string; state: string; errorCode: string | null; truncated: number; createdMs: number; finishedMs: number }>(),
     installationTimeZone(db as unknown as D1Database, installationId).catch(() => null as string | null),
-    notion.status(), notion.binding(ordersBinding), notion.binding(peopleBinding),
+    notion.status(), notion.binding(ordersBinding), listNotionPeopleAccounts(db as unknown as D1Database, installationId),
   ]);
-  const schema = reminderSchema(settings); const peopleLayout = peopleSchema(settings);
+  const schema = reminderSchema(settings);
   let lastRun = null;
   if (last) {
     const [counts, items, names] = await Promise.all([
@@ -67,15 +71,13 @@ async function view(context: AdminRouteContext, db: Database, now: number) {
     settings: {
       enabled: settings?.enabled === 1, weekdays: parseWeekdays(settings?.weekdays ?? "1,3,5"), runTime: settings?.runTime ?? "15:00",
       staleMinutes: settings?.staleMinutes ?? 2880, cooldownMinutes: settings?.cooldownMinutes ?? 2880, discordChannelId: settings?.discordChannelId ?? null,
-      peopleKey: settings?.peopleKey ?? "external_id", revision: settings?.revision ?? 0,
+      revision: settings?.revision ?? 0,
     },
-    core: { connected: status.connected, capabilities: { comment: status.capabilities.comment, update: status.capabilities.update }, ordersBound: Boolean(orders), peopleBound: Boolean(people) },
+    core: { connected: status.connected, capabilities: { comment: status.capabilities.comment, update: status.capabilities.update }, ordersBound: Boolean(orders) },
     target: schema ? { dataSourceName: schema.dataSourceName ?? null, verifiedMs: settings?.verifiedMs ?? null, schemaError: settings?.schemaError ?? null, statuses: schema.statuses, current: targetCurrent } : null,
     targetVerified: targetVerified(settings) && targetCurrent,
-    people: settings?.peopleDataSourceId ? {
-      dataSourceName: parsePeopleName(settings), verifiedMs: settings.peopleVerifiedMs, error: settings.peopleError,
-      current: Boolean(peopleLayout && people && sameId(peopleLayout.dataSourceId, people.dataSourceId)),
-    } : null,
+    // Core's people matching: set up (a verified People database in Core) and how many rows match a member. Only a count leaves here.
+    people: { setUp: accounts !== undefined, matched: matchedAccounts(accounts).length },
     problem: settings?.lastError ?? null, problemMs: settings?.lastErrorMs ?? null,
     timeZone, nextRunMs,
     activeRun: active ? { runKey: active.runKey, kind: active.kind, state: active.state } : null,
@@ -83,26 +85,24 @@ async function view(context: AdminRouteContext, db: Database, now: number) {
   });
 }
 
-const parsePeopleName = (settings: SettingsRow) => { try { return (JSON.parse(settings.peopleSchemaJson ?? "") as { dataSourceName?: string }).dataSourceName ?? null; } catch { return null; } };
-
 /** PUT /reminders/settings: the whole form, with the revision it was loaded at. */
 async function saveSettings(context: AdminRouteContext, db: Database, actor: string, now: number) {
   const input = object(await context.json(4096));
-  const allowed = new Set(["revision", "enabled", "weekdays", "runTime", "staleMinutes", "cooldownMinutes", "discordChannelId", "peopleKey"]);
+  const allowed = new Set(["revision", "enabled", "weekdays", "runTime", "staleMinutes", "cooldownMinutes", "discordChannelId"]);
   if (Object.keys(input).some((key) => !allowed.has(key)) || !Number.isInteger(input.revision)) return refuse(400, "validation", "Send the reminder settings and their revision only.");
   const problems = settingsProblems(input);
   if (Object.keys(problems).length) return refuse(400, "validation", Object.values(problems)[0]!, { errors: problems });
   const settings = await readSettings(db);
   if (input.enabled && !targetVerified(settings)) return refuse(409, "target_unverified", "Check the ordering database for reminders before turning them on.");
   const results = await db.batch([
-    db.prepare(`INSERT INTO part_requests_reminder_settings(installation_id,enabled,weekdays,run_time,stale_minutes,cooldown_minutes,discord_channel_id,people_key,schedule_since_ms,revision,updated_ms)
-      VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,1,?9)
+    db.prepare(`INSERT INTO part_requests_reminder_settings(installation_id,enabled,weekdays,run_time,stale_minutes,cooldown_minutes,discord_channel_id,schedule_since_ms,revision,updated_ms)
+      VALUES (?1,?2,?3,?4,?5,?6,?7,?8,1,?8)
       ON CONFLICT(installation_id) DO UPDATE SET enabled=excluded.enabled,weekdays=excluded.weekdays,run_time=excluded.run_time,stale_minutes=excluded.stale_minutes,
-        cooldown_minutes=excluded.cooldown_minutes,discord_channel_id=excluded.discord_channel_id,people_key=excluded.people_key,
+        cooldown_minutes=excluded.cooldown_minutes,discord_channel_id=excluded.discord_channel_id,
         schedule_since_ms=CASE WHEN (excluded.enabled=1 AND enabled=0) OR excluded.weekdays<>weekdays OR excluded.run_time<>run_time THEN excluded.schedule_since_ms ELSE schedule_since_ms END,
         revision=revision+1,updated_ms=excluded.updated_ms
-      WHERE part_requests_reminder_settings.revision=?10`)
-      .bind(installationId, input.enabled ? 1 : 0, formatWeekdays(input.weekdays as number[]), input.runTime, input.staleMinutes, input.cooldownMinutes, input.discordChannelId, input.peopleKey as PeopleKey, now, input.revision),
+      WHERE part_requests_reminder_settings.revision=?9`)
+      .bind(installationId, input.enabled ? 1 : 0, formatWeekdays(input.weekdays as number[]), input.runTime, input.staleMinutes, input.cooldownMinutes, input.discordChannelId, now, input.revision),
     audit(db, actor, "part_requests.reminders_saved", now, true),
   ]);
   if (results[0]?.meta?.changes !== 1) return refuse(409, "revision_conflict", "Someone else changed reminder settings. Reload to see their changes, then try again.");
@@ -134,37 +134,10 @@ async function verifyTarget(context: AdminRouteContext, db: Database, actor: str
   return view(context, db, now);
 }
 
-/** POST /reminders/people/verify: {}. Reads the layout of the People database chosen in Core. Read only from then on. */
-async function verifyPeople(context: AdminRouteContext, db: Database, actor: string, now: number) {
-  if (!await emptyBody(context)) return refuse(400, "validation", "Send an empty body. Choose the People database in the field above.");
-  const settings = await readSettings(db);
-  const previous = settings?.peopleSchemaJson ? JSON.parse(settings.peopleSchemaJson) : undefined;
-  let schema;
-  try { schema = await new RemindersNotion(context.services.notion).readPeopleSchema(previous); }
-  catch (error) { return verifyFailure(error); }
-  if (!schema) return refuse(409, "people_unbound", "Choose the People database first.");
-  await db.batch([
-    ensureSettings(db, now),
-    db.prepare(`UPDATE part_requests_reminder_settings SET people_data_source_id=?,people_schema_json=?,people_verified_ms=?,people_error=NULL,
-      last_error=CASE WHEN last_error='people_schema' THEN NULL ELSE last_error END,updated_ms=? WHERE installation_id=?`)
-      .bind(schema.dataSourceId, JSON.stringify(schema), now, now, installationId),
-    audit(db, actor, "part_requests.reminders_people_verified", now),
-  ]);
-  return view(context, db, now);
-}
-
-/** DELETE /reminders/people: stop using People; pings go back to default recipients. Core's binding is cleared in Core. */
-async function removePeople(context: AdminRouteContext, db: Database, actor: string, now: number) {
-  await db.batch([
-    db.prepare("UPDATE part_requests_reminder_settings SET people_data_source_id=NULL,people_schema_json=NULL,people_verified_ms=NULL,people_error=NULL,updated_ms=? WHERE installation_id=?").bind(now, installationId),
-    audit(db, actor, "part_requests.reminders_people_removed", now),
-  ]);
-  return view(context, db, now);
-}
-
 /**
- * POST /reminders/preview: a dry run. It reads the ordering database's layout, People's first page when it is used, and one
- * page of 50 stale requests (3 Notion requests at most), and writes nothing anywhere: no comment, no message, no mark, no row.
+ * POST /reminders/preview: a dry run. It reads the ordering database's layout and one page of 50 stale requests (2 Notion
+ * requests; who to ping comes from Core's people matching, which costs none), and writes nothing anywhere: no comment, no
+ * message, no mark, no row.
  */
 async function preview(context: AdminRouteContext, db: Database, now: number) {
   const settings = await readSettings(db);
@@ -176,14 +149,7 @@ async function preview(context: AdminRouteContext, db: Database, now: number) {
     const notion = new RemindersNotion(context.services.notion);
     const schema = await notion.readReminderSchema(config.schema);
     if (!sameId(schema.dataSourceId, config.schema.dataSourceId)) return refuse(409, "target_changed", "The ordering database chosen in Core changed. Check it again for reminders.");
-    const { members, fallback } = await rosterMentions(db, localToday(timeZone, now));
-    let map = fallback; let source: "people" | "fallback" = "fallback"; let peopleIncomplete = false;
-    const peopleNow = config.people ? await context.services.notion.binding(peopleBinding) : undefined;
-    if (config.people && peopleNow && sameId(peopleNow.dataSourceId, config.people.schema.dataSourceId)) {
-      const page = await notion.peoplePage(config.people.schema, 100);
-      const rows: PeopleRow[] = page.rows.filter((row) => row.active && row.memberKey && row.accounts.length);
-      if (rows.length) { map = resolveByPeople(rows, rosterIndex(members, config.people.key)); source = "people"; peopleIncomplete = Boolean(page.next); }
-    }
+    const { map, source } = await rosterMentions(db, localToday(timeZone, now));
     const page = await notion.staleRequestsPage(schema, new Date(staleBefore).toISOString(), new Date(cooldownBefore).toISOString(), previewPageSize);
     const rows = page.rows.map((row) => staleRow(row, schema)).filter((row): row is StaleRow => row !== undefined).filter((row) => isDue(row, schema.statuses.incomplete, staleBefore, cooldownBefore));
     const [recent, names] = await Promise.all([
@@ -201,7 +167,7 @@ async function preview(context: AdminRouteContext, db: Database, now: number) {
           pings: ids.length,
         };
       }),
-      more: Boolean(page.next), source, peopleIncomplete, discordOff: !config.channelId,
+      more: Boolean(page.next), source, discordOff: !config.channelId,
     });
   } catch (error) {
     if (error instanceof AppError) return verifyFailure(error);
@@ -225,16 +191,14 @@ async function runNow(db: Database, actor: string, now: number) {
 /** /admin/part-requests/reminders... Returns undefined for anything else. */
 export async function remindersRoute(context: AdminRouteContext, path: string): Promise<Response | undefined> {
   const method = context.request.method;
-  const known = path === "" && method === "GET" || path === "/settings" && method === "PUT" || path === "/verify" && method === "POST" || path === "/people/verify" && method === "POST"
-    || path === "/people" && method === "DELETE" || path === "/preview" && method === "POST" || path === "/run" && method === "POST";
+  const known = path === "" && method === "GET" || path === "/settings" && method === "PUT" || path === "/verify" && method === "POST"
+    || path === "/preview" && method === "POST" || path === "/run" && method === "POST";
   if (!known) return undefined;
   const { userId } = await requireAdmin(context);
   const db = context.db as Database; const now = Date.now();
   if (path === "") return view(context, db, now);
   if (path === "/settings") return saveSettings(context, db, userId, now);
   if (path === "/verify") return verifyTarget(context, db, userId, now);
-  if (path === "/people/verify") return verifyPeople(context, db, userId, now);
-  if (path === "/people") return removePeople(context, db, userId, now);
   if (path === "/preview") return preview(context, db, now);
   return runNow(db, userId, now);
 }

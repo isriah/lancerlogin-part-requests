@@ -54,6 +54,9 @@ export function createTestDatabase(): TestDatabase {
     CREATE TABLE organization_settings (installation_id TEXT PRIMARY KEY NOT NULL, time_zone TEXT);
     CREATE TABLE member_labels (id TEXT PRIMARY KEY, installation_id TEXT NOT NULL, name TEXT NOT NULL);
     CREATE TABLE member_label_changes (id TEXT PRIMARY KEY, installation_id TEXT NOT NULL, member_id TEXT NOT NULL, label_id TEXT NOT NULL, action TEXT NOT NULL, effective_date TEXT NOT NULL, created_at TEXT NOT NULL);
+    -- What Core's people matching answers (listNotionPeopleAccounts in module-sdk-stub.ts), as tests set it.
+    CREATE TABLE core_people_matching (installation_id TEXT PRIMARY KEY NOT NULL, verified INTEGER NOT NULL);
+    CREATE TABLE core_people_accounts (seq INTEGER PRIMARY KEY, installation_id TEXT NOT NULL, member_id TEXT, external_id TEXT NOT NULL, name TEXT NOT NULL, notion_user_id TEXT NOT NULL, matched INTEGER NOT NULL);
     INSERT INTO installations(id) VALUES ('primary');
   `);
   for (const name of readdirSync(migrations).filter((file) => file.endsWith(".sql")).sort()) {

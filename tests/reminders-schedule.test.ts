@@ -53,12 +53,12 @@ test("other days and times, the next slot, and local dates", () => {
 });
 
 test("settings validation, including minutes for testing", () => {
-  const good = { enabled: true, weekdays: [1, 3, 5], runTime: "15:00", staleMinutes: 2880, cooldownMinutes: 2880, discordChannelId: "123456789012345678", peopleKey: "external_id" };
+  const good = { enabled: true, weekdays: [1, 3, 5], runTime: "15:00", staleMinutes: 2880, cooldownMinutes: 2880, discordChannelId: "123456789012345678" };
   assert.deepEqual(settingsProblems(good), {});
   // The channel is required while reminders are on, and may be empty while they are off.
   assert.ok(settingsProblems({ ...good, discordChannelId: null }).discordChannelId);
   assert.deepEqual(settingsProblems({ ...good, enabled: false, discordChannelId: null }), {});
-  assert.deepEqual(settingsProblems({ ...good, staleMinutes: 1, cooldownMinutes: 43_200, discordChannelId: "123456789012345678", peopleKey: "id" }), {});
+  assert.deepEqual(settingsProblems({ ...good, staleMinutes: 1, cooldownMinutes: 43_200, discordChannelId: "123456789012345678" }), {});
   for (const minutes of [0, -1, 43_201, 1.5, "10", null]) {
     assert.ok(settingsProblems({ ...good, staleMinutes: minutes }).staleMinutes, `stale ${minutes}`);
     assert.ok(settingsProblems({ ...good, cooldownMinutes: minutes }).cooldownMinutes, `cooldown ${minutes}`);
@@ -66,7 +66,6 @@ test("settings validation, including minutes for testing", () => {
   for (const weekdays of [[], [0], [8], [1, 1], "1,3,5", [1.5]]) assert.ok(settingsProblems({ ...good, weekdays }).weekdays, JSON.stringify(weekdays));
   for (const runTime of ["24:00", "3:00", "15:60", "", 1500]) assert.ok(settingsProblems({ ...good, runTime }).runTime, String(runTime));
   for (const channel of ["123", "abc456789012345678", "", 1234567890123456789]) assert.ok(settingsProblems({ ...good, discordChannelId: channel }).discordChannelId, String(channel));
-  assert.ok(settingsProblems({ ...good, peopleKey: "email" }).peopleKey);
   assert.ok(settingsProblems({ ...good, enabled: "yes" }).enabled);
   assert.deepEqual(parseWeekdays("5,1,3,3,9"), [1, 3, 5]);
 });
