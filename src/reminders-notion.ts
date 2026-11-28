@@ -1,12 +1,9 @@
-// Notion for stale-request reminders, through Core's shared connection (`services.notion`). Reminders use two bindings:
+// Notion for stale-request reminders, through Core's shared connection (`services.notion`). Reminders use one binding:
 // `orders`, the ordering database students send requests to (queried for stale requests, commented on, and "Reminder sent"
-// set), and the optional, read-only `people` (Notion account to LancerLogin member ID). This plugin never sees the token and
-// never names a database: Core supplies both from the bindings an Admin chose, and refuses a page outside them.
+// set). Who each Notion person is comes from Core's people matching, not from Notion (see reminders.ts). This plugin never
+// sees the token and never names a database: Core supplies both from the binding an Admin chose, and refuses a page outside it.
 import type { NotionService } from "@lancerlogin/module-sdk/api";
 import { AppError, decodedId, notionFailure, ordersBinding, sameId, validPageUrl, type Choice, type PropertyMapping } from "./notion.ts";
-
-/** The read-only People database: each row is one member, keyed by their LancerLogin member ID. Chores is its only writer. */
-export const peopleBinding = "people";
 
 type Json = Record<string, any>;
 
@@ -17,9 +14,6 @@ export type ReminderSchema = {
   readonly dataSourceId: string; readonly databaseId: string; readonly dataSourceName?: string;
   readonly properties: Readonly<Record<ReminderField, PropertyMapping>>; readonly statuses: ReminderStatuses;
 };
-export type PeopleField = "account" | "memberId" | "active";
-export type PeopleSchema = { readonly dataSourceId: string; readonly databaseId: string; readonly dataSourceName?: string; readonly properties: Readonly<Record<PeopleField, PropertyMapping>> };
-
 type Expected = { readonly name: string; readonly types: readonly string[] };
 const reminderFields: Readonly<Record<ReminderField, Expected>> = {
   description: { name: "Item Description", types: ["title"] },
@@ -27,11 +21,6 @@ const reminderFields: Readonly<Record<ReminderField, Expected>> = {
   people: { name: "Orderer/Recipient", types: ["people"] },
   created: { name: "Created", types: ["created_time"] },
   reminderSent: { name: "Reminder sent", types: ["date"] },
-};
-const peopleFields: Readonly<Record<PeopleField, Expected>> = {
-  account: { name: "Notion account", types: ["people"] },
-  memberId: { name: "LancerLogin member ID", types: ["rich_text", "title", "number"] },
-  active: { name: "Active", types: ["checkbox"] },
 };
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -72,12 +61,6 @@ export function mapReminderSchema(source: Json, databaseId: string, previous?: R
   return { dataSourceId: String(source.id), databaseId, ...(name ? { dataSourceName: name } : {}), properties, statuses };
 }
 
-export function mapPeopleSchema(source: Json, databaseId: string, previous?: PeopleSchema, listedName?: string): PeopleSchema {
-  const properties = mapFields(source, peopleFields, previous && sameId(previous.dataSourceId, source.id) ? previous.properties : undefined);
-  const name = (listedName || sourceTitle(source) || "").trim().slice(0, 200);
-  return { dataSourceId: String(source.id), databaseId, ...(name ? { dataSourceName: name } : {}), properties };
-}
-
 /** A row's property by the mapped ID. Rows report IDs encoded where data sources report them plain, so compare decoded. */
 export function rowProperty(row: Json, mapping: PropertyMapping): Json | undefined {
   const id = decodedId(mapping.id);
@@ -107,14 +90,6 @@ export function staleRow(row: Json, schema: ReminderSchema): StaleRow | undefine
     people: rowPeople(row, schema.properties.people), status: String(status?.[status?.type]?.name ?? ""),
     createdMs: Number.isFinite(createdMs) ? createdMs : Number.NaN, reminderSentMs: Number.isFinite(sentMs) ? sentMs : null,
   };
-}
-
-/** A People row: its Notion accounts, the member ID it holds, and whether Active is ticked. Names are not read. */
-export type PeopleRow = { readonly accounts: readonly string[]; readonly memberKey: string; readonly active: boolean };
-export function peopleRow(row: Json, schema: PeopleSchema): PeopleRow {
-  const id = rowProperty(row, schema.properties.memberId);
-  const memberKey = id?.type === "number" ? (typeof id.number === "number" && Number.isFinite(id.number) ? String(id.number) : "") : plainText(id?.[id?.type]);
-  return { accounts: rowPeople(row, schema.properties.account), memberKey: memberKey.trim(), active: rowProperty(row, schema.properties.active)?.checkbox === true };
 }
 
 /** Mentions beyond this are left out of a comment; Discord allows 100, and nobody names this many on one request. */
@@ -156,14 +131,6 @@ export class RemindersNotion {
     return mapReminderSchema(source, bound.databaseId, previous, bound.name);
   }
 
-  /** The People database's layout, or undefined while no People database is chosen in Core. */
-  async readPeopleSchema(previous?: PeopleSchema): Promise<PeopleSchema | undefined> {
-    const bound = await this.#call(0, () => this.#notion.binding(peopleBinding));
-    if (!bound) return undefined;
-    const source = await this.#call(1, () => this.#notion.dataSource(peopleBinding));
-    return mapPeopleSchema(source, bound.databaseId, previous, bound.name);
-  }
-
   /**
    * One page of Incomplete Requests created before `staleBefore` whose "Reminder sent" is empty or before `cooldownBefore`,
    * oldest first. The caller checks every row again, since a filter that Notion read differently must not send a reminder.
@@ -181,14 +148,6 @@ export class RemindersNotion {
     }));
     if (!Array.isArray(page.results)) throw new AppError("Notion returned an unreadable response.", "notion_response");
     return { rows: page.results, ...(page.nextCursor ? { next: page.nextCursor } : {}) };
-  }
-
-  /** One page of People rows with Active ticked. Read only: this plugin never writes to People. */
-  async peoplePage(schema: PeopleSchema, pageSize: number, cursor?: string): Promise<{ readonly rows: readonly PeopleRow[]; readonly next?: string }> {
-    const active = schema.properties.active;
-    const page = await this.#call(1, () => this.#notion.query(peopleBinding, { pageSize, ...(cursor ? { cursor } : {}), filter: { property: active.id, checkbox: { equals: true } } }));
-    if (!Array.isArray(page.results)) throw new AppError("Notion returned an unreadable response.", "notion_response");
-    return { rows: (page.results as Json[]).map((row) => peopleRow(row, schema)), ...(page.nextCursor ? { next: page.nextCursor } : {}) };
   }
 
   /**

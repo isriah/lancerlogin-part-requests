@@ -1,13 +1,13 @@
 // Settings > Part Requests > Reminders, Admin only: stale-request reminders. Reminders always use the ordering database chosen
-// on the Connection tab; this tab checks its layout for reminders, places Core's picker for the optional People database
-// and Core's field for the name Notion shows on reminder comments, holds the schedule and thresholds, previews a run
+// on the Connection tab; this tab checks its layout for reminders, says whether Core's people matching (set up in Core) is in
+// use, places Core's field for the name Notion shows on reminder comments, holds the schedule and thresholds, previews a run
 // without sending anything, and shows the last run.
 import { useEffect, useId, useState, type FormEvent } from "react";
-import { NotionBindingField, NotionCommentNameField } from "@lancerlogin/module-sdk/dashboard";
+import { NotionCommentNameField } from "@lancerlogin/module-sdk/dashboard";
 import { errorText, request, RequestError } from "./part-requests-http.ts";
-import { formatDateTime, notionPageLink } from "./part-requests-model.ts";
+import { formatDateTime, integrationsLabel, integrationsPath, notionPageLink } from "./part-requests-model.ts";
 import {
-  daysToMinutes, durationLabel, lastRunSummary, minutesToDays, peopleBadge, peopleNote, reminderProblemText, remindersBadge, remindersRoute, scheduleText, skipText, stepText, testingThreshold, testingThresholdNote,
+  daysToMinutes, durationLabel, lastRunSummary, minutesToDays, peopleMatchingState, reminderProblemText, remindersBadge, remindersRoute, scheduleText, skipText, stepText, testingThreshold, testingThresholdNote,
   unpingedText, weekdayNames, type PreviewResult, type RemindersView, type RequestLink,
 } from "./part-requests-reminders-model.ts";
 import { Field, fieldAria, LoadState, Notice, Pill, type NoticeValue } from "./part-requests-ui";
@@ -29,7 +29,6 @@ export function RemindersTab() {
       <StatusCard view={view} onView={setView} reload={load} />
       <SettingsCard key={view.settings.revision} view={view} onView={setView} />
       <CommentNameCard />
-      <PeopleCard view={view} onView={setView} reload={load} />
       {view.lastRun && <LastRunCard view={view} />}
     </>}
   </>;
@@ -82,6 +81,7 @@ function StatusCard({ view, onView, reload }: { view: RemindersView; onView: (vi
   return <section className="ui-card pr-stack" aria-labelledby={`${ids}title`}>
     <div className="pr-card-heading"><h2 id={`${ids}title`}>Stale-request reminders</h2><Pill badge={remindersBadge(view)} /></div>
     <p className="field-help pr-notice">On the chosen days, every Incomplete Request in the ordering database older than the threshold gets a Notion comment mentioning its Orderer/Recipient and a Discord message pinging them, then its Reminder sent date is set so it is not reminded again until the cooldown passes. Requests themselves are never changed or ordered.</p>
+    <p className="field-help pr-notice">Who to ping comes from LancerLogin's people matching, set up in <a href={integrationsPath}>{integrationsLabel}</a>: {peopleMatchingState(view.people)}.</p>
     {problem && <Notice notice={{ tone: "error", content: problem }} />}
     {view.target?.schemaError && <Notice notice={{ tone: "error", content: view.target.schemaError }} />}
     {(comment === "refused" || update === "refused") && <Notice notice={{ tone: "warning", content: `Core's Notion connection lacks ${[comment === "refused" ? "Insert comments" : "", update === "refused" ? "Update content" : ""].filter(Boolean).join(" and ")}. Turn ${comment === "refused" && update === "refused" ? "them" : "it"} on in the connection's Capabilities in Notion's integration settings.` }} />}
@@ -103,7 +103,7 @@ function StatusCard({ view, onView, reload }: { view: RemindersView; onView: (vi
 
 function PreviewList({ preview }: { preview: PreviewResult }) {
   return <div className="pr-stack" role="region" aria-label="Preview">
-    <p className="ui-status settings-notice pr-notice" role="status">Preview only: nothing was sent or changed. {preview.requests.length ? `${preview.requests.length} stale ${preview.requests.length === 1 ? "request" : "requests"}${preview.more ? " shown; more exist" : ""}.` : "No stale requests right now."}{preview.source === "people" ? " Pings use the People database." : " Pings use default recipients."}{preview.peopleIncomplete ? " Only the first 100 People rows were read for this preview." : ""}</p>
+    <p className="ui-status settings-notice pr-notice" role="status">Preview only: nothing was sent or changed. {preview.requests.length ? `${preview.requests.length} stale ${preview.requests.length === 1 ? "request" : "requests"}${preview.more ? " shown; more exist" : ""}.` : "No stale requests right now."}{preview.source === "people" ? " Pings use LancerLogin's people matching." : " Pings use default recipients."}</p>
     {preview.requests.length > 0 && <div className="responsive-table"><table className="ui-table pr-table">
       <thead><tr><th scope="col">Request</th><th scope="col">Created</th><th scope="col">People</th><th scope="col">Outcome</th></tr></thead>
       <tbody>{preview.requests.map((row, index) => {
@@ -130,7 +130,6 @@ function SettingsCard({ view, onView }: { view: RemindersView; onView: (view: Re
   const [staleDays, setStaleDays] = useState(minutesToDays(initial.staleMinutes));
   const [cooldownDays, setCooldownDays] = useState(minutesToDays(initial.cooldownMinutes));
   const [channel, setChannel] = useState(initial.discordChannelId ?? "");
-  const [peopleKey, setPeopleKey] = useState(initial.peopleKey);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ notice: NoticeValue; key: number }>();
@@ -142,7 +141,7 @@ function SettingsCard({ view, onView }: { view: RemindersView; onView: (view: Re
     setBusy(true); setErrors({}); setResult(undefined);
     try {
       const next = await request<RemindersView>(`${remindersRoute}/settings`, "PUT", {
-        revision: initial.revision, enabled, weekdays, runTime, staleMinutes, cooldownMinutes, discordChannelId: channel.trim() || null, peopleKey,
+        revision: initial.revision, enabled, weekdays, runTime, staleMinutes, cooldownMinutes, discordChannelId: channel.trim() || null,
       });
       onView(next);
     } catch (caught) {
@@ -193,52 +192,17 @@ function SettingsCard({ view, onView }: { view: RemindersView; onView: (view: Re
     <Field id={`${ids}channel`} label="Discord channel ID" help="The channel reminders are posted in. In Discord, right-click the channel and choose Copy Channel ID. Needed while reminders are on." error={errors.discordChannelId}>
       <input {...fieldAria(`${ids}channel`, errors.discordChannelId)} className="ui-control" type="text" inputMode="numeric" autoComplete="off" spellCheck={false} maxLength={20} value={channel} disabled={busy} onChange={(event) => setChannel(event.target.value.replace(/\D/g, ""))} />
     </Field>
-    <Field id={`${ids}key`} label="People database member ID" help="Which ID the People database's LancerLogin member ID column holds." error={errors.peopleKey}>
-      <select {...fieldAria(`${ids}key`, errors.peopleKey)} className="ui-control" value={peopleKey} disabled={busy} onChange={(event) => setPeopleKey(event.target.value as "external_id" | "id")}>
-        <option value="external_id">Typed member ID (recommended)</option>
-        <option value="id">Internal LancerLogin ID</option>
-      </select>
-    </Field>
     <div className="module-actions pr-actions"><button className="ui-button ui-button--primary" type="submit" disabled={busy}>{busy ? "Saving..." : "Save settings"}</button></div>
   </form>;
 }
 
 function CommentNameCard() {
   const ids = useId();
-  // Core stores the name and loads and saves it itself; like the People card, this card's heading stands for Core's (see the CSS).
+  // Core stores the name and loads and saves it itself; this card's heading stands for Core's (see the CSS).
   return <section className="ui-card pr-stack pr-comment-name" aria-labelledby={`${ids}title`}>
     <div className="pr-card-heading"><h2 id={`${ids}title`}>Name on reminder comments</h2></div>
     <p className="field-help pr-notice">The name Notion shows as the author of each reminder comment in the ordering database.</p>
     <NotionCommentNameField moduleId="part-requests" />
-  </section>;
-}
-
-function PeopleCard({ view, onView, reload }: { view: RemindersView; onView: (view: RemindersView) => void; reload: () => Promise<void> }) {
-  const ids = useId();
-  const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<{ notice: NoticeValue; key: number }>();
-  async function act(method: "POST" | "DELETE") {
-    if (busy) return;
-    setBusy(true); setResult(undefined);
-    try {
-      const next = await request<RemindersView>(`${remindersRoute}/people${method === "POST" ? "/verify" : ""}`, method, method === "POST" ? {} : undefined);
-      onView(next);
-      setResult({ notice: { tone: "success", content: method === "POST" ? `Checked ${next.people?.dataSourceName ?? "the People database"}.` : "Reminders no longer use the People database." }, key: Date.now() });
-    } catch (caught) { setResult({ notice: { tone: "error", content: errorText(caught, "That did not work. Try again.") }, key: Date.now() }); }
-    finally { setBusy(false); }
-  }
-  const usable = Boolean(view.people && view.people.current && !view.people.error);
-  // Core's picker brings its own card, heading, description and pill; this card's heading and pill stand for both (see the CSS).
-  return <section className="ui-card pr-stack pr-people" aria-labelledby={`${ids}title`}>
-    <div className="pr-card-heading"><h2 id={`${ids}title`}>People database</h2><Pill badge={peopleBadge(view)} /></div>
-    <p className="field-help pr-notice">Optional and read only. Reminders look up each Notion person's LancerLogin member ID in it (columns Notion account, LancerLogin member ID and Active) to find who to ping in Discord. Part Requests never writes to it.</p>
-    {result && <Notice notice={result.notice} focusKey={result.key} />}
-    <p className="ui-status settings-notice pr-notice" data-tone={usable ? "success" : view.people?.error || (view.people && !view.people.current) ? "warning" : undefined} role="status">{peopleNote(view)}</p>
-    {view.core.connected && <NotionBindingField moduleId="part-requests" bindingId="people" onChanged={(bound) => { if (bound !== view.core.peopleBound) void reload(); }} />}
-    <div className="module-actions pr-actions">
-      <button className={`ui-button${view.core.peopleBound && !usable && !busy ? " ui-button--primary" : ""}`} type="button" disabled={busy || !view.core.peopleBound} onClick={() => void act("POST")}>{busy ? "Checking..." : view.people ? "Check People again" : "Check People"}</button>
-      {view.people && <button className="ui-button" type="button" disabled={busy} onClick={() => void act("DELETE")}>Stop using People</button>}
-    </div>
   </section>;
 }
 

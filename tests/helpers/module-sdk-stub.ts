@@ -24,3 +24,17 @@ export async function reportRosterData(db: any, today: string) {
   }
   return { members: membersResult.results ?? [], labels };
 }
+/**
+ * Core's people matching (module SDK 1.10.0): People rows holding exactly one Notion account, from Core's local copy, with no
+ * Notion request. The stand-in reads the test tables `core_people_matching` (a row with verified=1 while Core has a verified
+ * People database) and `core_people_accounts` (d1.ts), so tests choose each row's `matched`, `memberId` and `name` directly.
+ * Undefined while Core has no verified People database, as the real function answers.
+ */
+export async function listNotionPeopleAccounts(db: any, installationId: string) {
+  const [setup, rows] = await Promise.all([
+    db.prepare("SELECT verified FROM core_people_matching WHERE installation_id=?").bind(installationId).first(),
+    db.prepare("SELECT member_id AS memberId,external_id AS externalId,name,notion_user_id AS notionUserId,matched FROM core_people_accounts WHERE installation_id=? ORDER BY seq").bind(installationId).all(),
+  ]);
+  if (setup?.verified !== 1) return undefined;
+  return (rows.results ?? []).map((row: any) => ({ memberId: row.memberId ?? null, externalId: row.externalId, name: row.name, notionUserId: row.notionUserId, matched: row.matched === 1 }));
+}

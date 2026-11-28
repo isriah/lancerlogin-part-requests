@@ -10,10 +10,9 @@ export const defaultCooldownMinutes = 2 * dayMinutes;
 /** 30 days, the longest threshold or cooldown, and how long run history is kept. */
 export const maximumMinutes = 30 * dayMinutes;
 
-export type PeopleKey = "external_id" | "id";
 export type ReminderSettingsInput = {
   readonly enabled: boolean; readonly weekdays: readonly number[]; readonly runTime: string; readonly staleMinutes: number;
-  readonly cooldownMinutes: number; readonly discordChannelId: string | null; readonly peopleKey: PeopleKey;
+  readonly cooldownMinutes: number; readonly discordChannelId: string | null;
 };
 
 const timePattern = /^([01]\d|2[0-3]):([0-5]\d)$/;
@@ -32,7 +31,6 @@ export function settingsProblems(input: Record<string, unknown>): Record<string,
   if (!validMinutes(input.cooldownMinutes)) problems.cooldownMinutes = `Use a whole number of minutes from 1 to ${maximumMinutes} (30 days).`;
   if (input.discordChannelId !== null && !validChannelId(input.discordChannelId)) problems.discordChannelId = "Paste a Discord channel ID: 17 to 20 digits.";
   else if (input.enabled === true && input.discordChannelId === null) problems.discordChannelId = "Choose the Discord channel reminders are posted in. It is needed while reminders are on.";
-  if (input.peopleKey !== "external_id" && input.peopleKey !== "id") problems.peopleKey = "Choose which member ID the People database holds.";
   return problems;
 }
 

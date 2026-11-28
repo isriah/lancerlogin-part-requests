@@ -3,25 +3,24 @@
 // on each in Notion with a mention of its Orderer/Recipient, posts the same reminder in Discord with a ping, and sets
 // "Reminder sent" so the cooldown holds.
 //
-// Notion goes through Core's connection (`services.notion`): the `orders` binding for the requests and the optional,
-// read-only `people` binding to find each person's Discord ID. Workers Free allows 10 ms of CPU per invocation, so a run
-// keeps its place in the database and each scheduler slice takes one step: a read of a layout or a page of rows, or one
-// provider step for one request (a comment or the mark costs Core one more read of the page first, to prove it is in the
-// ordering database). Steps for one request run in order and none starts while the one before it is pending: comment, then
-// Discord, then the mark. The job never touches the ordering connection's own state, so a reminder failure cannot stop
-// requests or the recipient refresh. Job results carry counts and codes only, never names.
-import { installationTimeZone, reportRosterData, type D1Database, type NotionService } from "@lancerlogin/module-sdk/api";
+// Notion goes through Core's connection (`services.notion`) and its `orders` binding, for the requests. Who each Notion person
+// is comes from Core's people matching (`listNotionPeopleAccounts`, Core's local copy of its People database), which costs
+// no Notion request. Workers Free allows 10 ms of CPU per invocation, so a run keeps its place in the database and each
+// scheduler slice takes one step: a read of the layout or a page of rows, or one provider step for one request (a comment or
+// the mark costs Core one more read of the page first, to prove it is in the ordering database). Steps for one request run
+// in order and none starts while the one before it is pending: comment, then Discord, then the mark. The job never touches
+// the ordering connection's own state, so a reminder failure cannot stop requests or the recipient refresh. Job results
+// carry counts and codes only, never names.
+import { installationTimeZone, listNotionPeopleAccounts, reportRosterData, type D1Database, type NotionPersonAccount, type NotionService } from "@lancerlogin/module-sdk/api";
 import { AppError } from "./notion.ts";
 import { installationId, sha256Hex, type Database, type Statement } from "./pairing.ts";
-import { dueSlot, durationText, localAt, minuteMs, parseWeekdays, type PeopleKey } from "./reminder-schedule.ts";
-import { RemindersNotion, maximumMentions, staleRow, type PeopleRow, type PeopleSchema, type ReminderSchema, type StaleRow } from "./reminders-notion.ts";
+import { dueSlot, durationText, localAt, minuteMs, parseWeekdays } from "./reminder-schedule.ts";
+import { RemindersNotion, maximumMentions, staleRow, type ReminderSchema, type StaleRow } from "./reminders-notion.ts";
 
 export const remindersJobId = "part-requests.reminders";
 export const collectPageSize = 20;
 /** 10 pages of 20: a run reminds about 200 requests at most and says it was truncated. */
 export const maximumCollectPages = 10;
-export const peoplePageSize = 100;
-export const maximumPeoplePages = 10;
 export const leaseMs = 60_000;
 export const historyMs = 30 * 24 * 60 * minuteMs;
 /**
@@ -35,10 +34,12 @@ export const commentAttempts = 3;
 export const markAttempts = 3;
 /** Discord is retried once, after its retry-after. */
 export const discordAttempts = 2;
-/** A schema, People or collect step that Notion could not answer is tried this many times before the run fails. */
+/** A schema or collect step that Notion could not answer is tried this many times before the run fails. */
 export const runAttempts = 5;
 /** How long a run waits while Core holds deliveries (after a restore) before it looks again. */
 export const pausedWaitMs = 5 * minuteMs;
+// 'people' is the state 1.3 and 1.4 used to read their own People database. A run left in it by an update is taken back
+// to the schema step, which needs no People read now.
 const activeStates = "('schema','people','collect','send')";
 
 // ---- Settings
@@ -46,21 +47,17 @@ const activeStates = "('schema','people','collect','send')";
 export type SettingsRow = {
   readonly enabled: number; readonly weekdays: string; readonly runTime: string; readonly staleMinutes: number; readonly cooldownMinutes: number;
   readonly discordChannelId: string | null; readonly databaseId: string | null; readonly dataSourceId: string | null; readonly schemaJson: string | null;
-  readonly verifiedMs: number | null; readonly schemaError: string | null; readonly peopleDataSourceId: string | null;
-  readonly peopleSchemaJson: string | null; readonly peopleVerifiedMs: number | null; readonly peopleError: string | null; readonly peopleKey: PeopleKey; readonly sinceMs: number;
+  readonly verifiedMs: number | null; readonly schemaError: string | null; readonly sinceMs: number;
   readonly lastError: string | null; readonly lastErrorMs: number | null; readonly revision: number; readonly updatedMs: number;
 };
 
 export const readSettings = (db: Database) => db.prepare(`SELECT enabled,weekdays,run_time AS runTime,stale_minutes AS staleMinutes,cooldown_minutes AS cooldownMinutes,
   discord_channel_id AS discordChannelId,database_id AS databaseId,data_source_id AS dataSourceId,schema_json AS schemaJson,verified_ms AS verifiedMs,schema_error AS schemaError,
-  people_data_source_id AS peopleDataSourceId,people_schema_json AS peopleSchemaJson,people_verified_ms AS peopleVerifiedMs,people_error AS peopleError,people_key AS peopleKey,
   schedule_since_ms AS sinceMs,last_error AS lastError,last_error_ms AS lastErrorMs,revision,updated_ms AS updatedMs
   FROM part_requests_reminder_settings WHERE installation_id=?`).bind(installationId).first<SettingsRow>();
 
 const parse = <T>(text: string | null | undefined): T | undefined => { if (!text) return undefined; try { return JSON.parse(text) as T; } catch { return undefined; } };
 export const reminderSchema = (settings: SettingsRow | null) => parse<ReminderSchema>(settings?.schemaJson);
-/** People's layout as last checked, while that check still stands. Without it reminders ping through default recipients. */
-export const peopleSchema = (settings: SettingsRow | null) => settings?.peopleDataSourceId && settings.peopleVerifiedMs && !settings.peopleError ? parse<PeopleSchema>(settings.peopleSchemaJson) : undefined;
 /** The ordering database's layout passed the reminders check and has not failed one since. Reminders need it, whatever the switch says. */
 export const targetVerified = (settings: SettingsRow | null) => Boolean(settings?.verifiedMs && !settings.schemaError && reminderSchema(settings));
 
@@ -70,43 +67,43 @@ export type Unpinged = "no_member" | "ambiguous" | "no_discord_id";
 export type Resolutions = Readonly<Record<string, string>>;
 export type RosterMember = { readonly id: string; readonly memberId: string; readonly discordUserId: string | null; readonly active: number };
 
-/**
- * Which member ID the People database's "LancerLogin member ID" column holds. The one place that choice is made: `external_id`
- * is the ID members type (the default), `id` is LancerLogin's internal row ID.
- */
-export const memberKey = (member: RosterMember, key: PeopleKey) => key === "id" ? member.id : member.memberId;
-
 const discordPattern = /^\d{17,20}$/;
-/** Active members by the chosen key: their Discord ID, or "" without one. Inactive members are not here, so they match nobody. */
-export function rosterIndex(members: readonly RosterMember[], key: PeopleKey): Record<string, string> {
+/** Active members by their internal ID: their Discord ID, or "" without one. Inactive members are not here, so they match nobody. */
+export function rosterIndex(members: readonly RosterMember[]): Record<string, string> {
   const index: Record<string, string> = {};
-  for (const member of members) if (member.active === 1 && memberKey(member, key)) index[memberKey(member, key)] = member.discordUserId && discordPattern.test(member.discordUserId) ? member.discordUserId : "";
+  for (const member of members) if (member.active === 1 && member.id) index[member.id] = member.discordUserId && discordPattern.test(member.discordUserId) ? member.discordUserId : "";
   return index;
 }
 
 const resolved = (discord: string | undefined): string => discord === undefined ? "!no_member" : discord || "!no_discord_id";
 
+/** Core's rows that match a member: only these are ever used to ping anyone. Names and external IDs are dropped here. */
+export const matchedAccounts = (accounts: readonly NotionPersonAccount[] | undefined) =>
+  (accounts ?? []).filter((row) => row?.matched === true && typeof row.memberId === "string" && row.memberId !== "" && typeof row.notionUserId === "string" && row.notionUserId !== "")
+    .map((row) => ({ notionUserId: row.notionUserId, memberId: row.memberId! }));
+
 /**
- * The People database: Notion account → member ID → Discord ID. Rows without Active are ignored. A Notion account on more
- * than one active row, or a member ID on more than one active row, is ambiguous, and nobody is pinged for it.
+ * Core's people matching: Notion account → member → Discord ID, from matched rows only. Core matches a member ID to one row
+ * at most; a Notion account on two matched rows, or a member on two, is ambiguous here anyway, and nobody is pinged for it.
  */
-export function resolveByPeople(rows: readonly PeopleRow[], roster: Readonly<Record<string, string>>): Record<string, string> {
-  const active = rows.filter((row) => row.active && row.memberKey && row.accounts.length);
-  const perAccount = new Map<string, number>(); const perMember = new Map<string, number>();
-  for (const row of active) {
-    perMember.set(row.memberKey, (perMember.get(row.memberKey) ?? 0) + 1);
-    for (const account of row.accounts) perAccount.set(account, (perAccount.get(account) ?? 0) + 1);
+export function resolveByPeople(rows: readonly { readonly notionUserId: string; readonly memberId: string }[], rosterById: Readonly<Record<string, string>>): Record<string, string> {
+  const perAccount = new Map<string, Set<string>>(); const perMember = new Map<string, Set<string>>();
+  for (const row of rows) {
+    perAccount.set(row.notionUserId, (perAccount.get(row.notionUserId) ?? new Set()).add(row.memberId));
+    perMember.set(row.memberId, (perMember.get(row.memberId) ?? new Set()).add(row.notionUserId));
   }
   const map: Record<string, string> = {};
-  for (const row of active) for (const account of row.accounts) {
-    map[account] = (perAccount.get(account) ?? 0) > 1 || (perMember.get(row.memberKey) ?? 0) > 1 ? "!ambiguous" : resolved(roster[row.memberKey]);
+  for (const [account, members] of perAccount) {
+    const member = [...members][0]!;
+    map[account] = members.size > 1 || (perMember.get(member)?.size ?? 0) > 1 ? "!ambiguous" : resolved(rosterById[member]);
   }
   return map;
 }
 
 /**
- * The fallback, without a People database: the one active member who chose this Notion person as their default recipient.
- * That may be a mentor rather than the member, and two members choosing the same person is ambiguous.
+ * The fallback, while Core's people matching is not set up or matches nobody: the one active member who chose this Notion
+ * person as their default recipient. That may be a mentor rather than the member, and two members choosing the same person
+ * is ambiguous.
  */
 export function resolveByRecipients(rows: readonly { readonly notionUserId: string; readonly memberId: string }[], rosterById: Readonly<Record<string, string>>): Record<string, string> {
   const members = new Map<string, Set<string>>();
@@ -156,12 +153,9 @@ export const discordNonce = async (runKey: string, pageId: string) => (await sha
 
 // ---- Runs
 
-export type RunConfig = {
-  readonly staleMinutes: number; readonly cooldownMinutes: number; readonly channelId: string | null;
-  readonly schema: ReminderSchema; readonly people: { readonly schema: PeopleSchema; readonly key: PeopleKey } | null;
-};
+export type RunConfig = { readonly staleMinutes: number; readonly cooldownMinutes: number; readonly channelId: string | null; readonly schema: ReminderSchema };
 type RunRow = {
-  readonly runKey: string; readonly kind: string; readonly state: string; readonly configJson: string; readonly mentionsJson: string | null; readonly peopleJson: string | null;
+  readonly runKey: string; readonly kind: string; readonly state: string; readonly configJson: string; readonly mentionsJson: string | null;
   readonly cursor: string | null; readonly pages: number; readonly truncated: number; readonly attempts: number; readonly leaseUntil: number; readonly nextAttempt: number;
 };
 type ItemRow = {
@@ -172,8 +166,7 @@ type ItemRow = {
 export function runConfig(settings: SettingsRow): RunConfig | undefined {
   const schema = reminderSchema(settings);
   if (!schema) return undefined;
-  const people = peopleSchema(settings);
-  return { staleMinutes: settings.staleMinutes, cooldownMinutes: settings.cooldownMinutes, channelId: settings.discordChannelId, schema, people: people ? { schema: people, key: settings.peopleKey } : null };
+  return { staleMinutes: settings.staleMinutes, cooldownMinutes: settings.cooldownMinutes, channelId: settings.discordChannelId, schema };
 }
 
 /** A new run, unless one with this key exists. */
@@ -181,7 +174,7 @@ export const insertRun = (db: Database, runKey: string, kind: "scheduled" | "man
   db.prepare(`INSERT INTO part_requests_reminder_runs(installation_id,run_key,kind,state,config_json,created_ms) VALUES (?,?,?,'schema',?,?) ON CONFLICT(installation_id,run_key) DO NOTHING`)
     .bind(installationId, runKey, kind, JSON.stringify(config), now);
 
-export const activeRunSql = `SELECT run_key AS runKey,kind,state,config_json AS configJson,mentions_json AS mentionsJson,people_json AS peopleJson,cursor,pages,truncated,attempts,
+export const activeRunSql = `SELECT run_key AS runKey,kind,state,config_json AS configJson,mentions_json AS mentionsJson,cursor,pages,truncated,attempts,
   lease_until_ms AS leaseUntil,next_attempt_ms AS nextAttempt FROM part_requests_reminder_runs WHERE installation_id=? AND state IN ${activeStates} ORDER BY created_ms LIMIT 1`;
 
 /** Stop whatever run is in progress, as when reminders are turned off or the target changes. Steps not started are skipped. */
@@ -213,15 +206,24 @@ export function isDue(row: { readonly status: string; readonly createdMs: number
   return row.status === incomplete && Number.isFinite(row.createdMs) && row.createdMs < staleBefore && (row.reminderSentMs === null || row.reminderSentMs < cooldownBefore);
 }
 
-/** Who to ping, from the roster and the default recipients: everything the run needs from LancerLogin, as IDs only. */
-export async function rosterMentions(db: Database, today: string) {
-  const [roster, chosen] = await Promise.all([
+export type Mentions = { readonly map: Resolutions; readonly source: "people" | "fallback" };
+
+/**
+ * Who to ping, from the roster, Core's people matching and the default recipients: everything a run needs from LancerLogin,
+ * as IDs only, and no Notion request. Core's matched rows decide when there are any; otherwise the default recipients do.
+ */
+export async function rosterMentions(db: Database, today: string): Promise<Mentions> {
+  const [roster, chosen, accounts] = await Promise.all([
     reportRosterData(db as unknown as D1Database, today),
     db.prepare("SELECT notion_user_id AS notionUserId,member_id AS memberId FROM part_requests_member_recipients WHERE installation_id=?").bind(installationId).all<{ notionUserId: string; memberId: string }>(),
+    listNotionPeopleAccounts(db as unknown as D1Database, installationId),
   ]);
-  // Names and emails come back with the roster; only IDs leave this function.
+  // Names and emails come back with the roster and with Core's People rows; only IDs leave this function.
   const members = (roster.members as readonly RosterMember[]).map(({ id, memberId, discordUserId, active }) => ({ id, memberId, discordUserId, active: Number(active) }));
-  return { members, fallback: resolveByRecipients(chosen.results ?? [], rosterIndex(members, "id")) };
+  const byId = rosterIndex(members);
+  const matched = matchedAccounts(accounts);
+  if (matched.length) return { map: resolveByPeople(matched, byId), source: "people" };
+  return { map: resolveByRecipients(chosen.results ?? [], byId), source: "fallback" };
 }
 
 // ---- The job
@@ -311,8 +313,7 @@ export async function reminderSlice(context: ReminderJobContext, now: number, no
       const gate = await notionGate(held, context.services.notion);
       if (gate) return gate;
     }
-    if (run.state === "schema") return await schemaStep(held, run, config, notion, timeZone);
-    if (run.state === "people") return await peopleStep(held, run, config, notion);
+    if (run.state === "schema" || run.state === "people") return await schemaStep(held, run, config, notion, timeZone);
     if (run.state === "collect") return await collectStep(held, run, config, notion);
     if (!item) return await finishRun(held, settings);
     if (item.nextAttempt > now) {
@@ -377,9 +378,9 @@ async function later(held: Held, error: AppError): Promise<Slice> {
 }
 
 /** A step Notion could not answer for now: try again later, and fail the run after `runAttempts`. Refusals fail it at once. */
-async function stepFailed(held: Held, run: RunRow, error: unknown, schemaColumn: "schema_error" | "people_error" = "schema_error"): Promise<Slice> {
+async function stepFailed(held: Held, run: RunRow, error: unknown): Promise<Slice> {
   if (!(error instanceof AppError)) throw error;
-  if (error.code === "schema") return failRun(held, schemaColumn === "schema_error" ? "schema" : "people_schema", [held.db.prepare(`UPDATE part_requests_reminder_settings SET ${schemaColumn}=? WHERE installation_id=?`).bind(error.message.slice(0, 500), installationId)]);
+  if (error.code === "schema") return failRun(held, "schema", [held.db.prepare("UPDATE part_requests_reminder_settings SET schema_error=? WHERE installation_id=?").bind(error.message.slice(0, 500), installationId)]);
   if (heldByCore(error)) return later(held, error);
   if (coreRefusals.has(error.code) || ["notion_401", "notion_403", "notion_404", "notion_400"].includes(error.code) || run.attempts + 1 >= runAttempts) return failRun(held, error.code);
   const wait = retryMs(error, minuteMs * (run.attempts + 1));
@@ -388,8 +389,9 @@ async function stepFailed(held: Held, run: RunRow, error: unknown, schemaColumn:
 }
 
 /**
- * Step 0: the ordering database's layout again through `orders` (and People's through `people`), and the roster's Discord
- * IDs, read once per run. A binding that now points at another data source stops the run: an Admin checks it again first.
+ * Step 0: the ordering database's layout again through `orders` (the step's one Notion request), then who to ping, from the
+ * roster and Core's people matching (no Notion request), read once per run. A binding that now points at another data source
+ * stops the run: an Admin checks it again first.
  */
 async function schemaStep(held: Held, run: RunRow, config: RunConfig, notion: RemindersNotion, timeZone: string | null): Promise<Slice> {
   const { db, now } = held;
@@ -399,44 +401,12 @@ async function schemaStep(held: Held, run: RunRow, config: RunConfig, notion: Re
   if (fresh.dataSourceId !== config.schema.dataSourceId) {
     return failRun(held, "target_changed", [db.prepare("UPDATE part_requests_reminder_settings SET schema_error=? WHERE installation_id=?").bind("The ordering database chosen in Core changed. Check it again for reminders.", installationId)]);
   }
-  let people: PeopleSchema | undefined;
-  if (config.people) {
-    try { people = await notion.readPeopleSchema(config.people.schema); }
-    catch (error) { return stepFailed(held, run, error, "people_error"); }
-    // People cleared or pointed elsewhere in Core: this run uses the default recipients, and the tab asks for a new check.
-    if (people && people.dataSourceId !== config.people.schema.dataSourceId) people = undefined;
-  }
   const today = timeZone ? localAt(timeZone, now).date : new Date(now).toISOString().slice(0, 10);
-  const { members, fallback } = await rosterMentions(db, today);
-  const usePeople = config.people && people ? { schema: people, key: config.people.key } : null;
-  const next = usePeople ? "people" : "collect";
-  const mentions = usePeople ? { roster: rosterIndex(members, usePeople.key), fallback } : { map: fallback, source: "fallback" };
-  await release(held, [db.prepare("UPDATE part_requests_reminder_runs SET state=?,config_json=?,mentions_json=?,attempts=0,cursor=NULL,pages=0 WHERE installation_id=? AND run_key=? AND lease_token=?")
-    .bind(next, JSON.stringify({ ...config, schema: fresh, people: usePeople }), JSON.stringify(mentions), installationId, held.runKey, held.lease)]);
-  return go({ step: next });
-}
-
-/** The People database, a page per slice. With no active rows, the default-recipient fallback is used instead. */
-async function peopleStep(held: Held, run: RunRow, config: RunConfig, notion: RemindersNotion): Promise<Slice> {
-  const { db } = held;
-  let page;
-  try { page = await notion.peoplePage(config.people!.schema, peoplePageSize, run.cursor ?? undefined); }
-  catch (error) {
-    // A People database that no longer fits stops the run rather than pinging by guesswork.
-    if (error instanceof AppError && ["notion_400", "notion_403", "notion_404"].includes(error.code)) return failRun(held, `people_${error.code}`);
-    return stepFailed(held, run, error);
-  }
-  const rows = [...(parse<PeopleRow[]>(run.peopleJson) ?? []), ...page.rows.filter((row) => row.active && row.memberKey && row.accounts.length)];
-  const pages = run.pages + 1;
-  if (page.next && pages < maximumPeoplePages) {
-    await release(held, [db.prepare("UPDATE part_requests_reminder_runs SET people_json=?,cursor=?,pages=?,attempts=0 WHERE installation_id=? AND run_key=? AND lease_token=?")
-      .bind(JSON.stringify(rows), page.next, pages, installationId, held.runKey, held.lease)]);
-    return go({ step: "people" });
-  }
-  const stored = parse<{ roster: Record<string, string>; fallback: Record<string, string> }>(run.mentionsJson) ?? { roster: {}, fallback: {} };
-  const map = rows.length ? resolveByPeople(rows, stored.roster) : stored.fallback;
-  await release(held, [db.prepare("UPDATE part_requests_reminder_runs SET state='collect',mentions_json=?,people_json=NULL,cursor=NULL,pages=0,attempts=0 WHERE installation_id=? AND run_key=? AND lease_token=?")
-    .bind(JSON.stringify({ map, source: rows.length ? "people" : "fallback" }), installationId, held.runKey, held.lease)]);
+  const mentions = await rosterMentions(db, today);
+  // The config is written field by field, so a run started by 1.3 or 1.4 leaves its People layout behind.
+  const next: RunConfig = { staleMinutes: config.staleMinutes, cooldownMinutes: config.cooldownMinutes, channelId: config.channelId, schema: fresh };
+  await release(held, [db.prepare("UPDATE part_requests_reminder_runs SET state='collect',config_json=?,mentions_json=?,people_json=NULL,attempts=0,cursor=NULL,pages=0 WHERE installation_id=? AND run_key=? AND lease_token=?")
+    .bind(JSON.stringify(next), JSON.stringify(mentions), installationId, held.runKey, held.lease)]);
   return go({ step: "collect" });
 }
 

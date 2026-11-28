@@ -18,5 +18,9 @@
   {
     "name": "0005_reminders.sql",
     "sha256": "cc4efd7b7f0a2ba02f1be0aa46bf266302e72a3b5154b0e89b5fe4566cca8b38"
+  },
+  {
+    "name": "0006_reminders_people_from_core.sql",
+    "sha256": "0e8350c26e8d4dbe2d3785bba8decb43606c3a6782c8cf22e00be81a96046e90"
   }
 ]
